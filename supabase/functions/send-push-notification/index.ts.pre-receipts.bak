@@ -1,0 +1,501 @@
+// DareDrop Serverless Edge Function: Send Push Notifications via Expo Push API
+// Triggered securely via Database Webhook on public.challenge_completions
+// PRE-RECEIPTS BASELINE ROLLBACK REFERENCE (Restores exact pre-Priority 1 dispatch implementation)
+
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
+
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || '';
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+const WEBHOOK_SECRET = Deno.env.get('WEBHOOK_SECRET') || '';
+const EXPO_ACCESS_TOKEN = Deno.env.get('EXPO_ACCESS_TOKEN') || '';
+
+interface WebhookPayload {
+  type: 'INSERT' | 'UPDATE' | 'DELETE';
+  table: string;
+  schema: string;
+  record: {
+    id: string;
+    challenge_id: string;
+    challenge_type: 'daily' | 'one_time';
+    participant_id: string;
+    verifier_id: string;
+    completion_date: string;
+    status: 'pending' | 'approved' | 'rejected';
+    submission_note: string | null;
+    rejection_reason: string | null;
+    submitted_at: string;
+    reviewed_at: string | null;
+  };
+  old_record?: {
+    id: string;
+    challenge_id: string;
+    challenge_type: 'daily' | 'one_time';
+    participant_id: string;
+    verifier_id: string;
+    status: 'pending' | 'approved' | 'rejected';
+    submitted_at: string;
+    reviewed_at: string | null;
+  } | null;
+}
+
+interface NotificationSpec {
+  recipientId: string;
+  eventType: 'submission_pending' | 'dare_approved' | 'dare_rejected' | 'verifier_reassigned';
+  title: string;
+  body: string;
+  idempotencyKey: string;
+  data: {
+    challengeId: string;
+    completionId: string;
+    type: string;
+  };
+}
+
+function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  let diff = 0;
+  for (let i = 0; i < a.byteLength; i++) {
+    diff |= a[i] ^ b[i];
+  }
+  return diff === 0;
+}
+
+export async function secureCompare(provided: string, expected: string): Promise<boolean> {
+  if (typeof provided !== 'string' || typeof expected !== 'string') return false;
+  if (provided.length === 0 || expected.length === 0) return false;
+
+  const enc = new TextEncoder();
+  const [digestProvided, digestExpected] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(provided)),
+    crypto.subtle.digest('SHA-256', enc.encode(expected)),
+  ]);
+
+  const bufA = new Uint8Array(digestProvided);
+  const bufB = new Uint8Array(digestExpected);
+
+  return constantTimeEqual(bufA, bufB);
+}
+
+function isExpoPushToken(token: string): boolean {
+  return typeof token === 'string' && (token.startsWith('ExponentPushToken[') || token.startsWith('ExpoPushToken['));
+}
+
+export function detectNotificationEvent(payload: WebhookPayload): NotificationSpec | null {
+  const { type, record, old_record } = payload;
+  if (!record) return null;
+
+  if (type === 'INSERT' && record.status === 'pending') {
+    return {
+      recipientId: record.verifier_id,
+      eventType: 'submission_pending',
+      title: 'New Dare Submission',
+      body: 'A completion was submitted and needs your review.',
+      idempotencyKey: `submission:${record.id}:${record.submitted_at}`,
+      data: {
+        challengeId: record.challenge_id,
+        completionId: record.id,
+        type: record.challenge_type,
+      },
+    };
+  }
+
+  if (type === 'UPDATE' && old_record) {
+    if (old_record.status === 'rejected' && record.status === 'pending') {
+      return {
+        recipientId: record.verifier_id,
+        eventType: 'submission_pending',
+        title: 'Dare Resubmitted',
+        body: 'A rejected dare was resubmitted and is ready for your review.',
+        idempotencyKey: `resubmission:${record.id}:${record.submitted_at}`,
+        data: {
+          challengeId: record.challenge_id,
+          completionId: record.id,
+          type: record.challenge_type,
+        },
+      };
+    }
+
+    if (old_record.status === 'pending' && record.status === 'approved') {
+      return {
+        recipientId: record.participant_id,
+        eventType: 'dare_approved',
+        title: 'Dare Approved! 🎉',
+        body: 'Your dare submission was reviewed and approved.',
+        idempotencyKey: `approved:${record.id}:${record.reviewed_at || record.submitted_at}`,
+        data: {
+          challengeId: record.challenge_id,
+          completionId: record.id,
+          type: record.challenge_type,
+        },
+      };
+    }
+
+    if (old_record.status === 'pending' && record.status === 'rejected') {
+      const reasonText = record.rejection_reason ? `: ${record.rejection_reason}` : '.';
+      return {
+        recipientId: record.participant_id,
+        eventType: 'dare_rejected',
+        title: 'Dare Rejected',
+        body: `Your submission was not approved${reasonText}`,
+        idempotencyKey: `rejected:${record.id}:${record.reviewed_at || record.submitted_at}`,
+        data: {
+          challengeId: record.challenge_id,
+          completionId: record.id,
+          type: record.challenge_type,
+        },
+      };
+    }
+
+    if (
+      old_record.verifier_id !== record.verifier_id &&
+      record.status === 'pending'
+    ) {
+      return {
+        recipientId: record.verifier_id,
+        eventType: 'verifier_reassigned',
+        title: 'You are Assigned as Verifier',
+        body: 'You have been assigned to verify a dare submission.',
+        idempotencyKey: `reassigned:${record.id}:${record.verifier_id}`,
+        data: {
+          challengeId: record.challenge_id,
+          completionId: record.id,
+          type: record.challenge_type,
+        },
+      };
+    }
+  }
+
+  return null;
+}
+
+const CLAIM_LEASE_SECONDS = 60;
+const CLAIM_LEASE_MS = CLAIM_LEASE_SECONDS * 1000;
+
+Deno.serve(async (req: Request) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-webhook-secret',
+      },
+    });
+  }
+
+  if (!WEBHOOK_SECRET) {
+    console.error('[send-push-notification] Misconfiguration: WEBHOOK_SECRET is not configured.');
+    return new Response(JSON.stringify({ error: 'Server webhook secret misconfigured' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const webhookSecretHeader = req.headers.get('x-webhook-secret');
+  const authHeader = req.headers.get('authorization');
+  let bearerToken: string | null = null;
+
+  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
+    bearerToken = authHeader.slice(7).trim();
+  }
+
+  const providedSecret = webhookSecretHeader || bearerToken;
+  if (!providedSecret) {
+    return new Response(JSON.stringify({ error: 'Missing authorization' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const isSecretValid = await secureCompare(providedSecret, WEBHOOK_SECRET);
+  const isServiceRoleValid =
+    SUPABASE_SERVICE_ROLE_KEY && (await secureCompare(providedSecret, SUPABASE_SERVICE_ROLE_KEY));
+
+  if (!isSecretValid && !isServiceRoleValid) {
+    return new Response(JSON.stringify({ error: 'Invalid webhook secret' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return new Response(JSON.stringify({ error: 'Missing server credentials' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  let body: WebhookPayload;
+  try {
+    body = await req.json();
+  } catch (err) {
+    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const spec = detectNotificationEvent(body);
+  if (!spec) {
+    return new Response(JSON.stringify({ message: 'No notification event detected for payload' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const workerClaimToken = crypto.randomUUID();
+  const claimStartTime = Date.now();
+
+  let deliveryId: string | null = null;
+  let activeClaimToken: string = workerClaimToken;
+  let acquiredClaim = false;
+
+  const { data: rpcClaims, error: rpcErr } = await supabaseAdmin.rpc('claim_notification_delivery', {
+    p_idempotency_key: spec.idempotencyKey,
+    p_completion_id: spec.data.completionId,
+    p_event_type: spec.eventType,
+    p_recipient_id: spec.recipientId,
+    p_lease_seconds: CLAIM_LEASE_SECONDS,
+    p_payload: { spec, claim_token: workerClaimToken, claimed_at: new Date().toISOString() },
+  });
+
+  const isRpcAvailable = !rpcErr && Array.isArray(rpcClaims) && rpcClaims.length > 0;
+
+  if (isRpcAvailable) {
+    const claim = rpcClaims[0];
+    if (claim.claim_status === 'already_processed') {
+      return new Response(
+        JSON.stringify({ message: 'Event already processed', idempotencyKey: spec.idempotencyKey, status: claim.current_status }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (claim.claim_status === 'in_progress') {
+      return new Response(
+        JSON.stringify({ message: 'Delivery currently in progress by concurrent worker', idempotencyKey: spec.idempotencyKey }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (claim.claim_status === 'claimed') {
+      deliveryId = claim.delivery_id;
+      activeClaimToken = claim.claim_token || workerClaimToken;
+      acquiredClaim = true;
+    }
+  } else {
+    const { data: claimData, error: claimErr } = await supabaseAdmin
+      .from('notification_deliveries')
+      .insert({
+        idempotency_key: spec.idempotencyKey,
+        completion_id: spec.data.completionId,
+        event_type: spec.eventType,
+        recipient_id: spec.recipientId,
+        tokens_sent: 0,
+        status: 'claimed',
+        payload: { spec, claim_token: workerClaimToken, claimed_at: new Date().toISOString() },
+      })
+      .select('id, status, created_at')
+      .maybeSingle();
+
+    if (claimData) {
+      deliveryId = claimData.id;
+      acquiredClaim = true;
+    } else if (claimErr && claimErr.code === '23505') {
+      const { data: existing } = await supabaseAdmin
+        .from('notification_deliveries')
+        .select('id, status, created_at, payload')
+        .eq('idempotency_key', spec.idempotencyKey)
+        .maybeSingle();
+
+      if (!existing) {
+        return new Response(JSON.stringify({ error: 'Contention during idempotency claim' }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      if (existing.status === 'sent' || existing.status === 'skipped_no_tokens' || existing.status === 'already_processed') {
+        return new Response(
+          JSON.stringify({ message: 'Event already processed', idempotencyKey: spec.idempotencyKey, status: existing.status }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+
+      if (existing.status === 'claimed') {
+        const claimAgeMs = Date.now() - new Date(existing.created_at).getTime();
+        if (claimAgeMs < CLAIM_LEASE_MS) {
+          return new Response(
+            JSON.stringify({ message: 'Delivery currently in progress by concurrent worker', idempotencyKey: spec.idempotencyKey }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+
+        const leaseCutoffIso = new Date(Date.now() - CLAIM_LEASE_MS).toISOString();
+        const { data: reclaimed } = await supabaseAdmin
+          .from('notification_deliveries')
+          .update({
+            status: 'claimed',
+            created_at: new Date().toISOString(),
+            error: null,
+            payload: { spec, claim_token: workerClaimToken, claimed_at: new Date().toISOString() },
+          })
+          .eq('id', existing.id)
+          .eq('status', 'claimed')
+          .lte('created_at', leaseCutoffIso)
+          .select('id');
+
+        if (reclaimed && reclaimed.length > 0) {
+          deliveryId = existing.id;
+          acquiredClaim = true;
+        } else {
+          return new Response(JSON.stringify({ message: 'Delivery claimed by another worker' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+      }
+    }
+  }
+
+  if (!acquiredClaim || !deliveryId) {
+    return new Response(
+      JSON.stringify({ message: 'Claim not acquired', idempotencyKey: spec.idempotencyKey }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+
+  async function recordDeliveryOutcome(
+    status: 'sent' | 'failed' | 'skipped_no_tokens',
+    tokensSent: number,
+    payloadData: any,
+    errorMessage: string | null = null,
+  ): Promise<boolean> {
+    if (!deliveryId) return false;
+
+    if (isRpcAvailable) {
+      const { data: ok, error: compErr } = await supabaseAdmin.rpc('complete_notification_delivery', {
+        p_delivery_id: deliveryId,
+        p_claim_token: activeClaimToken,
+        p_status: status,
+        p_tokens_sent: tokensSent,
+        p_payload: payloadData,
+        p_error: errorMessage,
+      });
+
+      if (!compErr && typeof ok === 'boolean') {
+        return ok;
+      }
+    }
+
+    const { data: updatedRows } = await supabaseAdmin
+      .from('notification_deliveries')
+      .update({
+        status,
+        tokens_sent: tokensSent,
+        payload: payloadData,
+        error: errorMessage,
+      })
+      .eq('id', deliveryId)
+      .eq('status', 'claimed')
+      .select('id');
+
+    return Boolean(updatedRows && updatedRows.length > 0);
+  }
+
+  const { data: tokenRows, error: tokenErr } = await supabaseAdmin
+    .from('user_push_tokens')
+    .select('expo_push_token')
+    .eq('user_id', spec.recipientId);
+
+  if (tokenErr) {
+    console.error('[send-push-notification] Error fetching push tokens:', tokenErr.message);
+    await recordDeliveryOutcome('failed', 0, { spec, error: tokenErr.message }, tokenErr.message);
+    return new Response(JSON.stringify({ error: tokenErr.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const allTokens = (tokenRows || []).map((r: { expo_push_token: string }) => r.expo_push_token);
+  const validTokens = allTokens.filter(isExpoPushToken);
+
+  if (validTokens.length === 0) {
+    await recordDeliveryOutcome('skipped_no_tokens', 0, { spec, reason: 'no_valid_tokens' });
+    return new Response(
+      JSON.stringify({ message: 'No registered push tokens for recipient', recipientId: spec.recipientId }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+
+  const elapsedSinceClaim = Date.now() - claimStartTime;
+  if (elapsedSinceClaim >= CLAIM_LEASE_MS - 5000) {
+    return new Response(
+      JSON.stringify({ error: 'Claim lease expired before dispatch' }),
+      { status: 408, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+
+  const messages = validTokens.map((token: string) => ({
+    to: token,
+    sound: 'default',
+    title: spec.title,
+    body: spec.body,
+    data: spec.data,
+    channelId: 'daredrop-default',
+    priority: 'high',
+  }));
+
+  const expoHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  };
+  if (expoAccessToken) {
+    expoHeaders['Authorization'] = `Bearer ${expoAccessToken}`;
+  }
+
+  let expoResponseData: any = null;
+  const invalidTokensToRemove: string[] = [];
+
+  try {
+    const expoRes = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: expoHeaders,
+      body: JSON.stringify(messages),
+    });
+
+    expoResponseData = await expoRes.json();
+
+    if (expoResponseData?.data && Array.isArray(expoResponseData.data)) {
+      expoResponseData.data.forEach((ticket: any, index: number) => {
+        if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
+          const badToken = validTokens[index];
+          if (badToken) invalidTokensToRemove.push(badToken);
+        }
+      });
+    }
+
+    if (invalidTokensToRemove.length > 0) {
+      await supabaseAdmin
+        .from('user_push_tokens')
+        .delete()
+        .in('expo_push_token', invalidTokensToRemove);
+      console.log(`[send-push-notification] Removed ${invalidTokensToRemove.length} unregistered tokens.`);
+    }
+
+    await recordDeliveryOutcome('sent', validTokens.length, { spec, expoResponse: expoResponseData });
+
+    return new Response(
+      JSON.stringify({ success: true, tokensSent: validTokens.length, data: expoResponseData }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  } catch (pushErr: any) {
+    console.error('[send-push-notification] Error calling Expo Push API:', pushErr?.message || pushErr);
+    await recordDeliveryOutcome('failed', 0, { spec, error: pushErr?.message || String(pushErr) }, pushErr?.message || String(pushErr));
+
+    return new Response(
+      JSON.stringify({ error: pushErr?.message || 'Failed to dispatch push notifications' }),
+      { status: 502, headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+});

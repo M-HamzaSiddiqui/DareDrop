@@ -17,7 +17,12 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "runtimeVersion": {
+        "policy": "sdkVersion"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "com.mohdhamzasteam.daredrop",
+      "googleServicesFile": "./google-services.json"
     },
     "web": {
       "output": "server",
@@ -32,11 +37,22 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
-      ]
+      ],
+      "expo-font",
+      "expo-image",
+      "expo-notifications",
+      "expo-status-bar",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "a53fd540-cf81-48a5-aac4-a9e629d38a10"
+      }
     }
   }
 }

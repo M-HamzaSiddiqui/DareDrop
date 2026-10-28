@@ -18,6 +18,11 @@ expo-env.d.ts
 *.key
 *.mobileprovision
 
+# Firebase & Cloud Service Account private keys
+*-service-account*.json
+*service-account*.json
+firebase-adminsdk*.json
+
 # Metro
 .metro-health-check*
 
@@ -31,10 +36,18 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
 
 # typescript
 *.tsbuildinfo
+
+# backups and dumps
+backups/
+*.dump
+*.sql.bak
+*.gpg
+*.enc
 
 example
 

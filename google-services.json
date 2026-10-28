@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "859683621892",
+    "project_id": "daredrop-8d7e8",
+    "storage_bucket": "daredrop-8d7e8.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:859683621892:android:05b35049a57906a09c3951",
+        "android_client_info": {
+          "package_name": "com.mohdhamzasteam.daredrop"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBdr5153Fpn0H33612KAPwNtUp2IAIzMcc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
