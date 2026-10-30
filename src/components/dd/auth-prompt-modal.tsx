@@ -1,7 +1,8 @@
 import { router } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Modal,
   Platform,
   Pressable,
@@ -19,24 +20,88 @@ export function AuthPromptModal() {
     authModalReason,
     hideAuthModal,
     signInWithGoogle,
+    linkWithGoogle,
     continueAsGuest,
     isAnonymous,
+    isRegistered,
   } = useAuth();
 
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const [googleError, setGoogleError] = useState<string | null>(null);
 
+  const showGoogleSpinner = isGoogleLoading && !isRegistered;
+
+  // Automatically dismiss the modal when user is confirmed authenticated
+  useEffect(() => {
+    if (isRegistered && authModalVisible) {
+      hideAuthModal();
+    }
+  }, [isRegistered, authModalVisible, hideAuthModal]);
+
   if (!authModalVisible) return null;
 
-  const handleGooglePress = async () => {
+  const handleGoogleSignIn = async () => {
+    setIsGoogleLoading(true);
+    setGoogleError(null);
+
+    // If currently an anonymous guest, warn before switching accounts
+    if (isAnonymous) {
+      const proceed = await new Promise<boolean>((resolve) => {
+        if (Platform.OS === 'web') {
+          const ok = window.confirm(
+            'Notice: You are currently on a guest profile with local progress. Signing into an existing Google account will switch to that account and will not merge this guest session. Continue?',
+          );
+          resolve(ok);
+        } else {
+          Alert.alert(
+            'Switching Account',
+            'You are currently on a guest profile with local progress. Signing into an existing Google account will switch to that account and will not merge this guest session. Continue?',
+            [
+              { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+              { text: 'Sign In & Switch', style: 'destructive', onPress: () => resolve(true) },
+            ],
+          );
+        }
+      });
+      if (!proceed) {
+        setIsGoogleLoading(false);
+        return;
+      }
+    }
+
+    try {
+      const res = await signInWithGoogle({ forceSignIn: true });
+      if (res.redirecting) return;
+      if (!res.success && res.error) {
+        if (!isRegistered) {
+          setGoogleError(res.error);
+        }
+        setIsGoogleLoading(false);
+      } else {
+        setIsGoogleLoading(false);
+        hideAuthModal();
+      }
+    } catch {
+      setIsGoogleLoading(false);
+    }
+  };
+
+  const handleGoogleLink = async () => {
     setIsGoogleLoading(true);
     setGoogleError(null);
     try {
-      const res = await signInWithGoogle();
+      const res = await linkWithGoogle();
+      if (res.redirecting) return;
       if (!res.success && res.error) {
-        setGoogleError(res.error);
+        if (!isRegistered) {
+          setGoogleError(res.error);
+        }
+        setIsGoogleLoading(false);
+      } else {
+        setIsGoogleLoading(false);
+        hideAuthModal();
       }
-    } finally {
+    } catch {
       setIsGoogleLoading(false);
     }
   };
@@ -81,7 +146,7 @@ export function AuthPromptModal() {
             <View style={styles.anonymousBanner}>
               <Text style={styles.anonymousBannerIcon}>💡</Text>
               <Text style={styles.anonymousBannerText}>
-                You have active guest progress! Registering or logging in with Google will save your existing dares and streaks to your account.
+                You have active guest progress! Linking Google will preserve your existing dares and streaks.
               </Text>
             </View>
           )}
@@ -89,25 +154,46 @@ export function AuthPromptModal() {
           {googleError && (
             <View style={styles.errorBox}>
               <Text style={styles.errorText}>{googleError}</Text>
+              {(googleError.includes('already linked') || googleError.includes('already registered')) && (
+                <Pressable onPress={handleGoogleSignIn}>
+                  <Text style={styles.errorActionText}>
+                    Sign in with Google instead →
+                  </Text>
+                </Pressable>
+              )}
             </View>
           )}
 
           {/* Action buttons */}
           <View style={styles.buttonStack}>
-            {/* Google OAuth Button */}
+            {/* Primary Google Action */}
             <Pressable
               style={({ pressed }) => [styles.googleBtn, pressed && { opacity: 0.85 }]}
-              onPress={handleGooglePress}
-              disabled={isGoogleLoading}>
-              {isGoogleLoading ? (
-                <ActivityIndicator color="#FFFFFF" size="small" />
+              onPress={isAnonymous ? handleGoogleLink : handleGoogleSignIn}
+              disabled={showGoogleSpinner || isRegistered}>
+              {showGoogleSpinner ? (
+                <ActivityIndicator color="#1A1A26" size="small" />
               ) : (
                 <>
                   <Text style={styles.googleIconText}>G</Text>
-                  <Text style={styles.googleBtnText}>Continue with Google</Text>
+                  <Text style={styles.googleBtnText}>
+                    {isAnonymous ? 'Link Google to Current Dares' : 'Continue with Google'}
+                  </Text>
                 </>
               )}
             </Pressable>
+
+            {/* If anonymous, provide secondary option to sign in to existing Google account */}
+            {isAnonymous && (
+              <Pressable
+                style={({ pressed }) => [styles.secondaryGoogleBtn, pressed && { opacity: 0.7 }]}
+                onPress={handleGoogleSignIn}
+                disabled={showGoogleSpinner || isRegistered}>
+                <Text style={styles.secondaryGoogleBtnText}>
+                  Already have an account? Sign in with Google
+                </Text>
+              </Pressable>
+            )}
 
             {/* Email/Password Button */}
             <Pressable
@@ -249,8 +335,25 @@ const styles = StyleSheet.create({
     color: DD.danger,
     lineHeight: 18,
   },
+  errorActionText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: DD.lime,
+    marginTop: DD.s2,
+  },
   buttonStack: {
     gap: DD.s3,
+  },
+  secondaryGoogleBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: DD.s2,
+  },
+  secondaryGoogleBtnText: {
+    fontSize: 13,
+    color: DD.lime,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   googleBtn: {
     flexDirection: 'row',

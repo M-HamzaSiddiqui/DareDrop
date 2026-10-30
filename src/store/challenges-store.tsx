@@ -25,8 +25,11 @@ import {
 import { fetchUnreadNotificationCount } from '@/lib/inbox';
 
 const LOCAL_CHALLENGES_KEY = '@daredrop/local_challenges_v1';
-const LOCAL_JOINED_KEY = '@daredrop/local_joined_ids_v1';
-const LOCAL_COMPLETIONS_KEY = '@daredrop/local_completions_v1';
+const LEGACY_UNSCOPED_JOINED_KEY = '@daredrop/local_joined_ids_v1';
+const getJoinedKey = (uid?: string | null) =>
+  `@daredrop/local_joined_ids_v1:${uid && uid.trim() ? uid.trim() : 'guest'}`;
+const getCompletionsKey = (uid?: string | null) =>
+  `@daredrop/local_completions_v1:${uid && uid.trim() ? uid.trim() : 'guest'}`;
 
 export interface CreateChallengeInput {
   title: string;
@@ -137,6 +140,13 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
     challengesRef.current = challenges;
   }, [challenges]);
 
+  const currentUserIdRef = useRef<string>(currentUserId);
+  useEffect(() => {
+    currentUserIdRef.current = currentUserId;
+  }, [currentUserId]);
+
+  const loadRequestIdRef = useRef<number>(0);
+
   const refreshUnreadNotificationsCount = useCallback(async (): Promise<number> => {
     try {
       const count = await fetchUnreadNotificationCount();
@@ -154,8 +164,9 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
   // Initialize identity and load challenges
   const loadChallenges = useCallback(
     async (userId?: string) => {
-      let activeUserId = userId;
-      if (!activeUserId) {
+      const reqId = ++loadRequestIdRef.current;
+      let activeUserId = userId !== undefined ? userId : currentUserIdRef.current;
+      if (!activeUserId && activeUserId !== '') {
         try {
           activeUserId = await getOrCreateCurrentUserId();
         } catch {
@@ -177,15 +188,21 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
             // Deduplicate with mock
             const map = new Map<string, Challenge>();
             [...parsed, ...MOCK_CHALLENGES].forEach((c) => map.set(c.id, c));
-            setChallenges(Array.from(map.values()));
-          } else {
+            if (reqId === loadRequestIdRef.current) {
+              setChallenges(Array.from(map.values()));
+            }
+          } else if (reqId === loadRequestIdRef.current) {
             setChallenges(MOCK_CHALLENGES);
           }
         } catch {
-          setChallenges(MOCK_CHALLENGES);
+          if (reqId === loadRequestIdRef.current) {
+            setChallenges(MOCK_CHALLENGES);
+          }
         } finally {
-          setLoading(false);
-          setRefreshing(false);
+          if (reqId === loadRequestIdRef.current) {
+            setLoading(false);
+            setRefreshing(false);
+          }
         }
         return;
       }
@@ -201,30 +218,67 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
 
         if (fetchErr) throw fetchErr;
 
+        // Race check: discard if another request started or active user changed
+        if (
+          reqId !== loadRequestIdRef.current ||
+          currentUserIdRef.current !== (userId !== undefined ? userId : currentUserIdRef.current)
+        ) {
+          return;
+        }
+
         // 2. Fetch user's joined challenges
         // Respects privacy-conscious RLS where users only see their own participation rows
         const countsByChallenge: Record<string, number> = {};
         const userJoinedSet = new Set<string>();
 
-        try {
-          const { data: participants } = await supabase
-            .from('challenge_participants')
-            .select('challenge_id, user_id');
+        if (activeUserId) {
+          try {
+            const { data: participants } = await supabase
+              .from('challenge_participants')
+              .select('challenge_id, user_id');
 
-          if (participants) {
-            participants.forEach((p: any) => {
-              countsByChallenge[p.challenge_id] = (countsByChallenge[p.challenge_id] || 0) + 1;
-              if (activeUserId && p.user_id === activeUserId) {
-                userJoinedSet.add(p.challenge_id);
-              }
-            });
-            setJoinedIds(userJoinedSet);
-            AsyncStorage.setItem(LOCAL_JOINED_KEY, JSON.stringify(Array.from(userJoinedSet))).catch(
-              () => {},
-            );
+            // Race check: discard if user changed while fetching participants
+            if (reqId !== loadRequestIdRef.current || currentUserIdRef.current !== activeUserId) {
+              return;
+            }
+
+            if (participants) {
+              participants.forEach((p: any) => {
+                countsByChallenge[p.challenge_id] = (countsByChallenge[p.challenge_id] || 0) + 1;
+                if (activeUserId && p.user_id === activeUserId) {
+                  userJoinedSet.add(p.challenge_id);
+                }
+              });
+              setJoinedIds(userJoinedSet);
+              const userJoinedKey = getJoinedKey(activeUserId);
+              AsyncStorage.setItem(userJoinedKey, JSON.stringify(Array.from(userJoinedSet))).catch(
+                () => {},
+              );
+            }
+          } catch {
+            // Keep local joined IDs if participant fetch fails
           }
-        } catch {
-          // Keep local joined IDs if participant fetch fails
+        } else {
+          // Guest mode: load guest-scoped joined IDs (if any offline/guest local joins exist)
+          const guestJoinedKey = getJoinedKey('guest');
+          try {
+            const cached = await AsyncStorage.getItem(guestJoinedKey);
+            if (cached && reqId === loadRequestIdRef.current && !currentUserIdRef.current) {
+              const parsed = JSON.parse(cached);
+              if (Array.isArray(parsed)) {
+                parsed.forEach((id: string) => userJoinedSet.add(id));
+                setJoinedIds(userJoinedSet);
+              }
+            }
+          } catch {}
+        }
+
+        // Final race check before committing state
+        if (
+          reqId !== loadRequestIdRef.current ||
+          currentUserIdRef.current !== (userId !== undefined ? userId : currentUserIdRef.current)
+        ) {
+          return;
         }
 
         const typedChallenges = (dbChallenges || []) as DbChallenge[];
@@ -239,57 +293,55 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
 
         // Always display real Supabase records in production mode (never merge dummy mock data)
         setChallenges(mapped);
-        AsyncStorage.setItem(LOCAL_CHALLENGES_KEY, JSON.stringify(mapped)).catch(() => {});
+
+        // Cache public challenges with joined: false so other users or guests never inherit joined: true
+        const publicCache = mapped.map((c) => ({ ...c, joined: false }));
+        AsyncStorage.setItem(LOCAL_CHALLENGES_KEY, JSON.stringify(publicCache)).catch(() => {});
       } catch (err: any) {
-        const errorMsg = err?.message || 'Could not connect to Supabase';
-        setError(errorMsg);
-        // Fall back gracefully to genuine locally cached challenges if offline
-        try {
-          const cached = await AsyncStorage.getItem(LOCAL_CHALLENGES_KEY);
-          if (cached) {
-            const parsed: Challenge[] = JSON.parse(cached).map((c: any) => ({
-              ...c,
-              createdAt: new Date(c.createdAt),
-              endsAt: new Date(c.endsAt),
-            }));
-            if (parsed.length > 0) {
-              setChallenges(parsed);
+        if (reqId === loadRequestIdRef.current) {
+          const errorMsg = err?.message || 'Could not connect to Supabase';
+          setError(errorMsg);
+          // Fall back gracefully to genuine locally cached challenges if offline
+          try {
+            const cached = await AsyncStorage.getItem(LOCAL_CHALLENGES_KEY);
+            if (cached && reqId === loadRequestIdRef.current) {
+              const userJoinedKey = getJoinedKey(activeUserId);
+              const cachedJoined = await AsyncStorage.getItem(userJoinedKey);
+              const joinedSet = new Set(cachedJoined ? JSON.parse(cachedJoined) : []);
+
+              const parsed: Challenge[] = JSON.parse(cached).map((c: any) => ({
+                ...c,
+                createdAt: new Date(c.createdAt),
+                endsAt: new Date(c.endsAt),
+                joined: joinedSet.has(c.id),
+              }));
+              if (parsed.length > 0) {
+                setChallenges(parsed);
+              }
             }
+          } catch {
+            // Keep current in-memory challenges
           }
-        } catch {
-          // Keep current in-memory challenges
         }
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        if (reqId === loadRequestIdRef.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     [],
   );
 
-  // Listen to Supabase auth events to keep identity synced across sessions and restarts
-  useEffect(() => {
-    if (!isSupabaseConfigured || !supabase) return;
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user?.id) {
-        setCurrentUserId(session.user.id);
-      }
-    });
-
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, []);
-
-  // Initialize identity and load challenges
+  // Initialize identity and load challenges on mount
   useEffect(() => {
     let isMounted = true;
 
     async function init() {
       try {
+        // Clean legacy unscoped joined key to avoid contaminated state from previous runs
+        AsyncStorage.removeItem(LEGACY_UNSCOPED_JOINED_KEY).catch(() => {});
+
         // Pre-load cached challenges immediately from local storage for offline responsiveness
         if (isSupabaseConfigured) {
           try {
@@ -299,6 +351,7 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
                 ...c,
                 createdAt: new Date(c.createdAt),
                 endsAt: new Date(c.endsAt),
+                joined: false, // Clean default: never assume joined from global cache
               }));
               if (parsed.length > 0) {
                 setChallenges(parsed);
@@ -314,20 +367,30 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
           try {
             const { data } = await supabase.auth.getSession();
             uid = data?.session?.user?.id || '';
+            currentUserIdRef.current = uid;
             if (isMounted) setCurrentUserId(uid);
           } catch (authErr: any) {
             console.warn('[DareDrop] Initial session read notice:', authErr?.message || authErr);
           }
         } else {
           uid = await getOrCreateCurrentUserId();
+          currentUserIdRef.current = uid;
           if (isMounted) setCurrentUserId(uid);
         }
 
-        // Load cached joined IDs
-        const cachedJoined = await AsyncStorage.getItem(LOCAL_JOINED_KEY);
-        if (cachedJoined && isMounted) {
+        // Load cached joined IDs scoped to this specific user / guest
+        const userJoinedKey = getJoinedKey(uid);
+        const cachedJoined = await AsyncStorage.getItem(userJoinedKey);
+        if (cachedJoined && isMounted && currentUserIdRef.current === uid) {
           try {
-            setJoinedIds(new Set(JSON.parse(cachedJoined)));
+            const joinedSet = new Set<string>(JSON.parse(cachedJoined));
+            setJoinedIds(joinedSet);
+            setChallenges((prev) =>
+              prev.map((c) => ({
+                ...c,
+                joined: joinedSet.has(c.id),
+              })),
+            );
           } catch {
             // Ignore parse errors
           }
@@ -357,7 +420,7 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
 
   const refreshChallenges = useCallback(async () => {
     setRefreshing(true);
-    await loadChallenges();
+    await loadChallenges(currentUserIdRef.current);
   }, [loadChallenges]);
 
   const fetchChallengeById = useCallback(
@@ -378,13 +441,17 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
           if (!dbErr && dbChallenge) {
             let joined = joinedIds.has(id);
             try {
-              const { data: parts } = await supabase
-                .from('challenge_participants')
-                .select('user_id')
-                .eq('challenge_id', id);
+              const activeUid = currentUserIdRef.current;
+              if (activeUid) {
+                const { data: parts } = await supabase
+                  .from('challenge_participants')
+                  .select('user_id')
+                  .eq('challenge_id', id)
+                  .eq('user_id', activeUid);
 
-              if (parts && parts.length > 0) {
-                joined = parts.some((p: any) => !currentUserId || p.user_id === currentUserId);
+                joined = Boolean(parts && parts.length > 0);
+              } else {
+                joined = joinedIds.has(id);
               }
             } catch {
               // Fall through to joinedIds
@@ -429,7 +496,7 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
 
       return null;
     },
-    [challenges, currentUserId, joinedIds],
+    [challenges, joinedIds],
   );
 
   const createChallenge = useCallback(
@@ -491,13 +558,15 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
         // Update state, local cache, and joined list
         setChallenges((prev) => {
           const next = [newAppChallenge, ...prev];
-          AsyncStorage.setItem(LOCAL_CHALLENGES_KEY, JSON.stringify(next)).catch(() => {});
+          const publicNext = next.map((c) => ({ ...c, joined: false }));
+          AsyncStorage.setItem(LOCAL_CHALLENGES_KEY, JSON.stringify(publicNext)).catch(() => {});
           return next;
         });
         setJoinedIds((prev) => {
           const next = new Set(prev);
           next.add(typedInserted.id);
-          AsyncStorage.setItem(LOCAL_JOINED_KEY, JSON.stringify(Array.from(next))).catch(() => {});
+          const userJoinedKey = getJoinedKey(authUserId);
+          AsyncStorage.setItem(userJoinedKey, JSON.stringify(Array.from(next))).catch(() => {});
           return next;
         });
 
@@ -524,14 +593,16 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
 
       setChallenges((prev) => {
         const next = [localChallenge, ...prev];
-        AsyncStorage.setItem(LOCAL_CHALLENGES_KEY, JSON.stringify(next)).catch(() => {});
+        const publicNext = next.map((c) => ({ ...c, joined: false }));
+        AsyncStorage.setItem(LOCAL_CHALLENGES_KEY, JSON.stringify(publicNext)).catch(() => {});
         return next;
       });
 
       setJoinedIds((prev) => {
         const next = new Set(prev);
         next.add(localId);
-        AsyncStorage.setItem(LOCAL_JOINED_KEY, JSON.stringify(Array.from(next))).catch(() => {});
+        const userJoinedKey = getJoinedKey(currentUserIdRef.current);
+        AsyncStorage.setItem(userJoinedKey, JSON.stringify(Array.from(next))).catch(() => {});
         return next;
       });
 
@@ -545,6 +616,7 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
       const challenge = challenges.find((c) => c.id === id);
       const currentlyJoined = joinedIds.has(id);
       const targetJoined = !currentlyJoined;
+      const initialUid = currentUserIdRef.current;
 
       // Optimistic update
       setJoinedIds((prev) => {
@@ -554,7 +626,8 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
         } else {
           next.delete(id);
         }
-        AsyncStorage.setItem(LOCAL_JOINED_KEY, JSON.stringify(Array.from(next))).catch(() => {});
+        const userJoinedKey = getJoinedKey(initialUid);
+        AsyncStorage.setItem(userJoinedKey, JSON.stringify(Array.from(next))).catch(() => {});
         return next;
       });
 
@@ -572,10 +645,11 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
 
       // If connected to Supabase, synchronize with challenge_participants
       if (isSupabaseConfigured && supabase) {
-        let authUserId = currentUserId;
+        let authUserId = initialUid;
         try {
           authUserId = await ensureAuthenticatedUser();
-          if (authUserId !== currentUserId) {
+          if (authUserId !== currentUserIdRef.current) {
+            currentUserIdRef.current = authUserId;
             setCurrentUserId(authUserId);
           }
         } catch (authErr: any) {
@@ -584,6 +658,8 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
             const next = new Set(prev);
             if (currentlyJoined) next.add(id);
             else next.delete(id);
+            const userJoinedKey = getJoinedKey(currentUserIdRef.current);
+            AsyncStorage.setItem(userJoinedKey, JSON.stringify(Array.from(next))).catch(() => {});
             return next;
           });
           setChallenges((prev) =>
@@ -601,6 +677,15 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
             success: false,
             joined: currentlyJoined,
             error: authErr?.message || 'Authentication required to join challenge.',
+          };
+        }
+
+        // Race check: confirm user didn't switch or log out
+        if (currentUserIdRef.current !== authUserId) {
+          return {
+            success: false,
+            joined: currentlyJoined,
+            error: 'User session changed during operation.',
           };
         }
 
@@ -623,6 +708,11 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
               .eq('user_id', authUserId);
 
             if (leaveErr) throw leaveErr;
+          }
+
+          // Confirm identity hasn't changed during remote network call
+          if (currentUserIdRef.current !== authUserId) {
+            return { success: false, joined: currentlyJoined, error: 'User session changed' };
           }
 
           // Refresh authoritative participant count from challenges table (updated by trigger)
@@ -653,6 +743,8 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
             const next = new Set(prev);
             if (currentlyJoined) next.add(id);
             else next.delete(id);
+            const userJoinedKey = getJoinedKey(authUserId);
+            AsyncStorage.setItem(userJoinedKey, JSON.stringify(Array.from(next))).catch(() => {});
             return next;
           });
 
@@ -674,7 +766,7 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
 
       return { success: true, joined: targetJoined };
     },
-    [challenges, currentUserId, joinedIds],
+    [challenges, joinedIds],
   );
 
   const isUserJoined = useCallback(
@@ -730,7 +822,7 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
         id: 'local_comp_' + Date.now().toString(36),
         challenge_id: params.challengeId,
         challenge_type: 'daily',
-        participant_id: currentUserId || 'local_user',
+        participant_id: currentUserIdRef.current || 'local_user',
         verifier_id: params.verifierId,
         completion_date: params.completionDate,
         status: 'pending',
@@ -741,17 +833,18 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
       };
 
       try {
-        const stored = await AsyncStorage.getItem(LOCAL_COMPLETIONS_KEY);
+        const userCompKey = getCompletionsKey(currentUserIdRef.current);
+        const stored = await AsyncStorage.getItem(userCompKey);
         const list: DbCompletion[] = stored ? JSON.parse(stored) : [];
         list.unshift(offlineCompletion);
-        await AsyncStorage.setItem(LOCAL_COMPLETIONS_KEY, JSON.stringify(list));
+        await AsyncStorage.setItem(userCompKey, JSON.stringify(list));
       } catch {
         // Ignore local storage error
       }
 
       return { success: true, completion: offlineCompletion };
     },
-    [currentUserId],
+    [],
   );
 
   const fetchCompletions = useCallback(
@@ -777,7 +870,8 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
       }
 
       try {
-        const stored = await AsyncStorage.getItem(LOCAL_COMPLETIONS_KEY);
+        const userCompKey = getCompletionsKey(currentUserIdRef.current);
+        const stored = await AsyncStorage.getItem(userCompKey);
         if (stored) {
           const list: DbCompletion[] = JSON.parse(stored);
           return list.filter((c) => c.challenge_id === challengeId);
@@ -1010,6 +1104,73 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
       unsubscribe();
     };
   }, [currentUserId, refreshPendingReviews, refreshUnreadNotificationsCount]);
+
+  // Supabase Auth lifecycle handler: ensures complete account isolation across logins, logouts, and user switches
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
+      // Ignore background token refresh events that don't alter the user identity
+      if (event === 'TOKEN_REFRESHED') return;
+
+      const newUid = session?.user?.id || '';
+
+      if (event === 'SIGNED_OUT' || !newUid) {
+        // User logged out: immediately clear all user-specific in-memory state
+        currentUserIdRef.current = '';
+        setCurrentUserId('');
+        setJoinedIds(new Set());
+        setPendingReviews([]);
+        setUnreadNotificationsCount(0);
+        setChallenges((prev) => prev.map((c) => ({ ...c, joined: false })));
+
+        // Pre-load clean guest-scoped joined state if any exists locally
+        const guestJoinedKey = getJoinedKey('guest');
+        try {
+          const cached = await AsyncStorage.getItem(guestJoinedKey);
+          if (cached && !currentUserIdRef.current) {
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed)) {
+              setJoinedIds(new Set(parsed));
+            }
+          }
+        } catch {}
+
+        // Reload public challenges for guest mode without any user membership
+        await loadChallenges('');
+      } else if (newUid !== currentUserIdRef.current || event === 'SIGNED_IN') {
+        // Genuine user change or fresh sign-in: isolate new user from previous user
+        currentUserIdRef.current = newUid;
+        setCurrentUserId(newUid);
+        setJoinedIds(new Set());
+        setPendingReviews([]);
+        setUnreadNotificationsCount(0);
+
+        // Pre-load user-scoped cache immediately for fast rendering
+        const userJoinedKey = getJoinedKey(newUid);
+        try {
+          const cached = await AsyncStorage.getItem(userJoinedKey);
+          if (cached && currentUserIdRef.current === newUid) {
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed)) {
+              setJoinedIds(new Set(parsed));
+            }
+          }
+        } catch {}
+
+        // Load authoritative data for the new user
+        await loadChallenges(newUid);
+        refreshPendingReviews().catch(() => {});
+        refreshUnreadNotificationsCount().catch(() => {});
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [loadChallenges, refreshPendingReviews, refreshUnreadNotificationsCount]);
 
   return (
     <ChallengesContext.Provider
