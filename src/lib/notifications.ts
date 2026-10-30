@@ -75,7 +75,6 @@ export async function setupAndroidNotificationChannel(): Promise<void> {
         importance: Notifications.AndroidImportance.HIGH,
         vibrationPattern: [0, 250, 250, 250],
         lightColor: '#CCFF00', // DareDrop lime accent
-        sound: 'default',
         enableVibrate: true,
       });
     } catch (err) {
