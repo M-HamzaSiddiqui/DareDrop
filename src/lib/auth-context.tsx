@@ -8,9 +8,7 @@ import type { Session, User } from '@supabase/supabase-js';
 import { isSupabaseConfigured, supabase } from './supabase';
 import { unregisterDevicePushTokenAsync } from './notifications';
 
-if (Platform.OS !== 'web') {
-  WebBrowser.maybeCompleteAuthSession();
-}
+WebBrowser.maybeCompleteAuthSession();
 
 export type AuthStatus = 'loading' | 'guest' | 'anonymous' | 'authenticated';
 
@@ -44,7 +42,18 @@ export interface AuthContextValue {
     upgraded?: boolean;
     needsEmailVerification?: boolean;
   }>;
-  signInWithGoogle: () => Promise<{ success: boolean; error?: string; upgraded?: boolean }>;
+  signInWithGoogle: (options?: { forceSignIn?: boolean }) => Promise<{
+    success: boolean;
+    error?: string;
+    upgraded?: boolean;
+    redirecting?: boolean;
+  }>;
+  linkWithGoogle: () => Promise<{
+    success: boolean;
+    error?: string;
+    upgraded?: boolean;
+    redirecting?: boolean;
+  }>;
   resetPassword: (email: string) => Promise<{ success: boolean; error?: string }>;
   signOut: () => Promise<void>;
   continueAsGuest: () => void;
@@ -60,6 +69,68 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 const GUEST_BROWSED_KEY = '@daredrop/guest_browsed_v1';
 
+const inFlightExchanges = new Map<string, Promise<{ success: boolean; error?: string }>>();
+const completedCodes = new Set<string>();
+
+/**
+ * Deduplicated OAuth authorization code exchange.
+ * Guarantees that single-use PKCE codes are sent to Supabase only once,
+ * even when both WebBrowser.openAuthSessionAsync and the Android deep link intent
+ * receive the callback URL concurrently.
+ */
+export async function exchangeOAuthCode(code: string): Promise<{ success: boolean; error?: string }> {
+  if (!supabase) return { success: false, error: 'Supabase is not configured' };
+  if (!code) return { success: false, error: 'No authorization code provided' };
+
+  // If this code was already successfully exchanged, check active registered session
+  if (completedCodes.has(code)) {
+    const { data } = await supabase.auth.getSession();
+    if (data?.session?.user && !data.session.user.is_anonymous) {
+      return { success: true };
+    }
+  }
+
+  // If an exchange for this code is already in flight, share the existing promise
+  const inFlight = inFlightExchanges.get(code);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const exchangePromise = (async () => {
+    try {
+      const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+      if (!error && data?.session?.user && !data.session.user.is_anonymous) {
+        completedCodes.add(code);
+        return { success: true };
+      }
+
+      // Check if session was updated/established (e.g. concurrent write or identity link)
+      const { data: sData } = await supabase.auth.getSession();
+      if (sData?.session?.user && !sData.session.user.is_anonymous) {
+        completedCodes.add(code);
+        return { success: true };
+      }
+
+      return {
+        success: false,
+        error: error?.message || 'Failed to exchange authorization code for session.',
+      };
+    } catch (err: any) {
+      const { data: sData } = await supabase.auth.getSession();
+      if (sData?.session?.user && !sData.session.user.is_anonymous) {
+        completedCodes.add(code);
+        return { success: true };
+      }
+      return { success: false, error: err?.message || 'An error occurred during code exchange.' };
+    } finally {
+      inFlightExchanges.delete(code);
+    }
+  })();
+
+  inFlightExchanges.set(code, exchangePromise);
+  return exchangePromise;
+}
+
 async function handleOAuthCallbackUrl(urlStr: string): Promise<boolean> {
   if (!supabase) return false;
   try {
@@ -67,8 +138,10 @@ async function handleOAuthCallbackUrl(urlStr: string): Promise<boolean> {
     const parsed = Linking.parse(urlStr);
     const code = (parsed.queryParams?.code as string) || '';
     if (code) {
-      const { data, error } = await supabase.auth.exchangeCodeForSession(code);
-      if (!error && data.session) return true;
+      const res = await exchangeOAuthCode(code);
+      if (res.success) return true;
+      const { data: sData } = await supabase.auth.getSession();
+      if (sData?.session?.user && !sData.session.user.is_anonymous) return true;
     }
 
     // 2. Check for hash parameters (implicit token flow: #access_token=...&refresh_token=...)
@@ -84,6 +157,8 @@ async function handleOAuthCallbackUrl(urlStr: string): Promise<boolean> {
           refresh_token: refreshToken,
         });
         if (!error && data.session) return true;
+        const { data: sData } = await supabase.auth.getSession();
+        if (sData?.session?.user && !sData.session.user.is_anonymous) return true;
       }
     }
     return false;
@@ -319,92 +394,195 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [user],
   );
 
-  const signInWithGoogle = useCallback(async (): Promise<{ success: boolean; error?: string; upgraded?: boolean }> => {
-    if (!isSupabaseConfigured || !supabase) {
-      return { success: false, error: 'Supabase is not configured' };
-    }
-
-    try {
-      let redirectUrl: string;
-      if (Platform.OS === 'web') {
-        redirectUrl =
-          typeof window !== 'undefined'
-            ? `${window.location.origin}/auth/callback`
-            : 'daredrop://auth/callback';
-      } else {
-        redirectUrl = Linking.createURL('auth/callback');
+  const signInWithGoogle = useCallback(
+    async (options?: { forceSignIn?: boolean }): Promise<{
+      success: boolean;
+      error?: string;
+      upgraded?: boolean;
+      redirecting?: boolean;
+    }> => {
+      if (!isSupabaseConfigured || !supabase) {
+        return { success: false, error: 'Supabase is not configured' };
       }
 
-      // CASE A: Existing anonymous user linking Google identity in-place
-      if (user && user.is_anonymous) {
-        try {
-          const { data, error } = await supabase.auth.linkIdentity({
-            provider: 'google',
-            options: {
-              redirectTo: redirectUrl,
-              skipBrowserRedirect: Platform.OS !== 'web',
-            },
-          });
+      try {
+        let redirectUrl: string;
+        if (Platform.OS === 'web') {
+          const origin =
+            typeof window !== 'undefined' && window.location.origin
+              ? window.location.origin.replace(/\/+$/, '')
+              : 'http://localhost:8081';
+          redirectUrl = `${origin}/auth/callback`;
+        } else {
+          redirectUrl = Linking.createURL('auth/callback', { scheme: 'daredrop' });
+        }
 
-          if (error) throw error;
+        // Check if we should attempt identity linking:
+        // Only link when the current session is anonymous AND caller did NOT request forceSignIn
+        const shouldLink = !options?.forceSignIn && Boolean(user && user.is_anonymous);
 
-          if (Platform.OS !== 'web' && data?.url) {
+        // CASE A: Existing anonymous user intentionally linking Google identity in-place
+        if (shouldLink) {
+          try {
+            const { data, error } = await supabase.auth.linkIdentity({
+              provider: 'google',
+              options: {
+                redirectTo: redirectUrl,
+                skipBrowserRedirect: true,
+              },
+            });
+
+            if (error) {
+              const errCode = (error as any)?.code || '';
+              const errMsg = error.message?.toLowerCase() || '';
+              if (errCode === 'manual_linking_disabled' || errMsg.includes('manual linking')) {
+                return {
+                  success: false,
+                  error:
+                    'Manual identity linking is disabled in your Supabase project. Please enable "Allow manual linking" in your Supabase Dashboard under Authentication -> Providers.',
+                };
+              }
+              if (errMsg.includes('already') || errCode.includes('identity_already_exists')) {
+                return {
+                  success: false,
+                  error:
+                    'This Google account is already linked to another DareDrop account. Use "Sign in with Google" to access that account, or link a different Google account to preserve your current guest progress.',
+                };
+              }
+              return { success: false, error: error.message || 'Failed to link Google account.' };
+            }
+
+            if (!data?.url) {
+              return { success: false, error: 'Google authentication URL was not returned by Supabase.' };
+            }
+
+            // Web environment: explicitly navigate the window to Google OAuth
+            if (Platform.OS === 'web') {
+              if (typeof window !== 'undefined') {
+                window.location.assign(data.url);
+                return { success: false, redirecting: true };
+              }
+              return { success: false, error: 'Web browser window is not available.' };
+            }
+
+            // Native environment: open in-app auth browser
             const authRes = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
             if (authRes.type === 'success' && authRes.url) {
               const ok = await handleOAuthCallbackUrl(authRes.url);
               if (ok) {
-                setAuthStatus('authenticated');
+                const { data: sData } = await supabase.auth.getSession();
+                if (sData?.session?.user) {
+                  setSession(sData.session);
+                  setUser(sData.session.user);
+                  setAuthStatus(sData.session.user.is_anonymous ? 'anonymous' : 'authenticated');
+                } else {
+                  setAuthStatus('authenticated');
+                }
                 setAuthModalVisible(false);
                 return { success: true, upgraded: true };
               }
             }
-            return { success: false, error: 'Google sign-in was cancelled.' };
-          }
 
-          return { success: true, upgraded: true };
-        } catch (linkErr: any) {
-          if (linkErr?.message?.toLowerCase().includes('already')) {
-            return {
-              success: false,
-              error:
-                'This Google account is already registered to another DareDrop account. Sign in to that account directly, or link a different Google account to preserve your current dares.',
-            };
+            // Fallback: Check if the user was already upgraded/authenticated
+            // (e.g. Android deep link intent routed directly to callback.tsx while WebBrowser was dismissed)
+            const { data: fallbackData } = await supabase.auth.getSession();
+            if (fallbackData?.session?.user && !fallbackData.session.user.is_anonymous) {
+              setSession(fallbackData.session);
+              setUser(fallbackData.session.user);
+              setAuthStatus('authenticated');
+              setAuthModalVisible(false);
+              return { success: true, upgraded: true };
+            }
+
+            return { success: false, error: 'Google linking was cancelled.' };
+          } catch (linkErr: any) {
+            const errCode = linkErr?.code || '';
+            const errMsg = linkErr?.message?.toLowerCase() || '';
+            if (errCode === 'manual_linking_disabled' || errMsg.includes('manual linking')) {
+              return {
+                success: false,
+                error:
+                  'Manual identity linking is disabled in your Supabase project. Please enable "Allow manual linking" in your Supabase Dashboard under Authentication -> Providers.',
+              };
+            }
+            if (errMsg.includes('already') || errCode.includes('identity_already_exists')) {
+              return {
+                success: false,
+                error:
+                  'This Google account is already linked to another DareDrop account. Use "Sign in with Google" to access that account, or link a different Google account to preserve your current guest progress.',
+              };
+            }
+            return { success: false, error: linkErr?.message || 'Failed to link Google account.' };
           }
-          return { success: false, error: linkErr?.message || 'Failed to link Google account.' };
         }
-      }
 
-      // CASE B: Standard Google OAuth sign-in / registration
-      const { data, error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          redirectTo: redirectUrl,
-          skipBrowserRedirect: Platform.OS !== 'web',
-        },
-      });
+        // CASE B: Standard Google OAuth sign-in / registration
+        // Uses signInWithOAuth directly, allowing users to sign in to an existing Google account
+        const { data, error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            redirectTo: redirectUrl,
+            skipBrowserRedirect: true,
+          },
+        });
 
-      if (error) {
-        return { success: false, error: error.message };
-      }
+        if (error) {
+          return { success: false, error: error.message || 'Google sign-in could not be initialized.' };
+        }
 
-      if (Platform.OS !== 'web' && data?.url) {
+        if (!data?.url) {
+          return { success: false, error: 'Google authentication URL was not returned by Supabase.' };
+        }
+
+        // Web environment: explicitly navigate the window to Google OAuth
+        if (Platform.OS === 'web') {
+          if (typeof window !== 'undefined') {
+            window.location.assign(data.url);
+            return { success: false, redirecting: true };
+          }
+          return { success: false, error: 'Web browser window is not available.' };
+        }
+
+        // Native environment: open in-app auth browser
         const authRes = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
         if (authRes.type === 'success' && authRes.url) {
           const ok = await handleOAuthCallbackUrl(authRes.url);
           if (ok) {
-            setAuthStatus('authenticated');
+            const { data: sData } = await supabase.auth.getSession();
+            if (sData?.session?.user) {
+              setSession(sData.session);
+              setUser(sData.session.user);
+              setAuthStatus(sData.session.user.is_anonymous ? 'anonymous' : 'authenticated');
+            } else {
+              setAuthStatus('authenticated');
+            }
             setAuthModalVisible(false);
             return { success: true };
           }
         }
-        return { success: false, error: 'Google sign-in was cancelled.' };
-      }
 
-      return { success: true };
-    } catch (err: any) {
-      return { success: false, error: err?.message || 'Google authentication failed.' };
-    }
-  }, [user]);
+        // Fallback: Check if the user is already authenticated
+        // (e.g. Android deep link intent routed directly to callback.tsx while WebBrowser was dismissed)
+        const { data: fallbackData } = await supabase.auth.getSession();
+        if (fallbackData?.session?.user && !fallbackData.session.user.is_anonymous) {
+          setSession(fallbackData.session);
+          setUser(fallbackData.session.user);
+          setAuthStatus('authenticated');
+          setAuthModalVisible(false);
+          return { success: true };
+        }
+
+        return { success: false, error: 'Google sign-in was cancelled.' };
+      } catch (err: any) {
+        return { success: false, error: err?.message || 'Google authentication failed.' };
+      }
+    },
+    [user],
+  );
+
+  const linkWithGoogle = useCallback(async () => {
+    return signInWithGoogle({ forceSignIn: false });
+  }, [signInWithGoogle]);
 
   const resetPassword = useCallback(async (email: string): Promise<{ success: boolean; error?: string }> => {
     if (!isSupabaseConfigured || !supabase) {
@@ -482,6 +660,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signInWithEmail,
         signUpWithEmail,
         signInWithGoogle,
+        linkWithGoogle,
         resetPassword,
         signOut,
         continueAsGuest,

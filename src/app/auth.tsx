@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -26,9 +26,11 @@ export default function AuthScreen() {
     signInWithEmail,
     signUpWithEmail,
     signInWithGoogle,
+    linkWithGoogle,
     resetPassword,
     continueAsGuest,
     isAnonymous,
+    isRegistered,
   } = useAuth();
 
   const [mode, setMode] = useState<AuthMode>('login');
@@ -44,6 +46,26 @@ export default function AuthScreen() {
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const hasDismissed = useRef(false);
+
+  const showGoogleSpinner = isGoogleLoading && !isRegistered;
+
+  const dismissAuth = () => {
+    if (hasDismissed.current) return;
+    hasDismissed.current = true;
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(tabs)');
+    }
+  };
+
+  // Automatically dismiss the auth modal/screen upon confirmed authentication
+  useEffect(() => {
+    if (isRegistered) {
+      dismissAuth();
+    }
+  }, [isRegistered]);
 
   const resetMessages = () => {
     setErrorMessage(null);
@@ -110,16 +132,14 @@ export default function AuthScreen() {
           if (res.upgraded) {
             setSuccessMessage('🎉 Account successfully upgraded! All your dares and streaks are saved.');
             setTimeout(() => {
-              if (router.canGoBack()) router.back();
-              else router.replace('/');
+              dismissAuth();
             }, 1200);
           } else if (res.needsEmailVerification) {
             setSuccessMessage('Account created! Please check your email to confirm your account before logging in.');
           } else {
             setSuccessMessage('Welcome to DareDrop!');
             setTimeout(() => {
-              if (router.canGoBack()) router.back();
-              else router.replace('/');
+              dismissAuth();
             }, 800);
           }
         } else {
@@ -160,8 +180,7 @@ export default function AuthScreen() {
       if (res.success) {
         setSuccessMessage('Welcome back!');
         setTimeout(() => {
-          if (router.canGoBack()) router.back();
-          else router.replace('/');
+          dismissAuth();
         }, 600);
       } else {
         setErrorMessage(res.error || 'Login failed. Check your credentials.');
@@ -171,36 +190,89 @@ export default function AuthScreen() {
     }
   };
 
-  const handleGoogleAuth = async () => {
+  const handleGoogleSignIn = async () => {
+    resetMessages();
+
+    // If currently holding an anonymous guest session, warn that signing in switches accounts
+    if (isAnonymous) {
+      const proceed = await new Promise<boolean>((resolve) => {
+        if (Platform.OS === 'web') {
+          const ok = window.confirm(
+            'Notice: You are currently on a guest profile with local progress. Signing into an existing Google account will switch to that account and will not merge this guest session. Continue?',
+          );
+          resolve(ok);
+        } else {
+          Alert.alert(
+            'Switching Account',
+            'You are currently on a guest profile with local progress. Signing into an existing Google account will switch to that account and will not merge this guest session. Continue?',
+            [
+              { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+              { text: 'Sign In & Switch', style: 'destructive', onPress: () => resolve(true) },
+            ],
+          );
+        }
+      });
+      if (!proceed) return;
+    }
+
+    setIsGoogleLoading(true);
+    try {
+      const res = await signInWithGoogle({ forceSignIn: true });
+      if (res.redirecting) {
+        // Browser navigation to Google OAuth is in progress; leave spinner active until page unloads
+        return;
+      }
+      if (res.success) {
+        setSuccessMessage('Welcome back!');
+        setTimeout(() => {
+          dismissAuth();
+        }, 600);
+      } else if (res.error) {
+        if (!isRegistered) {
+          setErrorMessage(res.error);
+        } else {
+          dismissAuth();
+        }
+        setIsGoogleLoading(false);
+      } else {
+        setIsGoogleLoading(false);
+      }
+    } catch {
+      setIsGoogleLoading(false);
+    }
+  };
+
+  const handleGoogleLink = async () => {
     resetMessages();
     setIsGoogleLoading(true);
     try {
-      const res = await signInWithGoogle();
-      if (res.success) {
-        if (res.upgraded) {
-          setSuccessMessage('🎉 Google account linked! Your dares and streaks are preserved.');
-        } else {
-          setSuccessMessage('Welcome to DareDrop!');
-        }
-        setTimeout(() => {
-          if (router.canGoBack()) router.back();
-          else router.replace('/');
-        }, 800);
-      } else if (res.error) {
-        setErrorMessage(res.error);
+      const res = await linkWithGoogle();
+      if (res.redirecting) {
+        return;
       }
-    } finally {
+      if (res.success) {
+        setSuccessMessage('🎉 Google account linked! Your dares and streaks are preserved.');
+        setTimeout(() => {
+          dismissAuth();
+        }, 600);
+      } else if (res.error) {
+        if (!isRegistered) {
+          setErrorMessage(res.error);
+        } else {
+          dismissAuth();
+        }
+        setIsGoogleLoading(false);
+      } else {
+        setIsGoogleLoading(false);
+      }
+    } catch {
       setIsGoogleLoading(false);
     }
   };
 
   const handleGuestContinue = () => {
     continueAsGuest();
-    if (router.canGoBack()) {
-      router.back();
-    } else {
-      router.replace('/');
-    }
+    dismissAuth();
   };
 
   return (
@@ -424,27 +496,87 @@ export default function AuthScreen() {
                 <View style={styles.dividerLine} />
               </View>
 
-              <Pressable
-                style={({ pressed }) => [
-                  styles.googleBtn,
-                  pressed && { opacity: 0.85 },
-                  isGoogleLoading && styles.googleBtnDisabled,
-                ]}
-                onPress={handleGoogleAuth}
-                disabled={isGoogleLoading}>
-                {isGoogleLoading ? (
-                  <ActivityIndicator color="#1A1A26" size="small" />
-                ) : (
-                  <>
-                    <View style={styles.googleIconBadge}>
-                      <Text style={styles.googleIconChar}>G</Text>
+              {mode === 'login' ? (
+                <>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.googleBtn,
+                      pressed && { opacity: 0.85 },
+                      showGoogleSpinner && styles.googleBtnDisabled,
+                    ]}
+                    onPress={handleGoogleSignIn}
+                    disabled={showGoogleSpinner || isRegistered}>
+                    {showGoogleSpinner ? (
+                      <ActivityIndicator color="#1A1A26" size="small" />
+                    ) : (
+                      <>
+                        <View style={styles.googleIconBadge}>
+                          <Text style={styles.googleIconChar}>G</Text>
+                        </View>
+                        <Text style={styles.googleBtnText}>Sign in with Google</Text>
+                      </>
+                    )}
+                  </Pressable>
+
+                  {isAnonymous && (
+                    <View style={styles.oauthHintRow}>
+                      <Text style={styles.oauthHintText}>Want to save your current guest dares instead? </Text>
+                      <Pressable onPress={() => handleTabSwitch('signup')}>
+                        <Text style={styles.oauthHintLink}>Link Google</Text>
+                      </Pressable>
                     </View>
-                    <Text style={styles.googleBtnText}>
-                      {isAnonymous ? 'Link with Google' : 'Continue with Google'}
-                    </Text>
-                  </>
-                )}
-              </Pressable>
+                  )}
+                </>
+              ) : isAnonymous ? (
+                <>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.googleBtn,
+                      pressed && { opacity: 0.85 },
+                      showGoogleSpinner && styles.googleBtnDisabled,
+                    ]}
+                    onPress={handleGoogleLink}
+                    disabled={showGoogleSpinner || isRegistered}>
+                    {showGoogleSpinner ? (
+                      <ActivityIndicator color="#1A1A26" size="small" />
+                    ) : (
+                      <>
+                        <View style={styles.googleIconBadge}>
+                          <Text style={styles.googleIconChar}>G</Text>
+                        </View>
+                        <Text style={styles.googleBtnText}>Link Google to this Account</Text>
+                      </>
+                    )}
+                  </Pressable>
+
+                  <View style={styles.oauthHintRow}>
+                    <Text style={styles.oauthHintText}>Already have a DareDrop account? </Text>
+                    <Pressable onPress={() => handleTabSwitch('login')}>
+                      <Text style={styles.oauthHintLink}>Sign in with Google</Text>
+                    </Pressable>
+                  </View>
+                </>
+              ) : (
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.googleBtn,
+                    pressed && { opacity: 0.85 },
+                    showGoogleSpinner && styles.googleBtnDisabled,
+                  ]}
+                  onPress={handleGoogleSignIn}
+                  disabled={showGoogleSpinner || isRegistered}>
+                  {showGoogleSpinner ? (
+                    <ActivityIndicator color="#1A1A26" size="small" />
+                  ) : (
+                    <>
+                      <View style={styles.googleIconBadge}>
+                        <Text style={styles.googleIconChar}>G</Text>
+                      </View>
+                      <Text style={styles.googleBtnText}>Continue with Google</Text>
+                    </>
+                  )}
+                </Pressable>
+              )}
             </>
           )}
 
@@ -816,6 +948,22 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     color: '#1A1A26',
+  },
+  oauthHintRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: DD.s3,
+    flexWrap: 'wrap',
+  },
+  oauthHintText: {
+    fontSize: 12,
+    color: DD.textMuted,
+  },
+  oauthHintLink: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: DD.lime,
   },
   guestSection: {
     marginTop: DD.s6,
