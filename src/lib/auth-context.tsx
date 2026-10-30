@@ -429,6 +429,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               options: {
                 redirectTo: redirectUrl,
                 skipBrowserRedirect: true,
+                queryParams: {
+                  prompt: 'select_account',
+                },
               },
             });
 
@@ -523,6 +526,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           options: {
             redirectTo: redirectUrl,
             skipBrowserRedirect: true,
+            queryParams: {
+              prompt: 'select_account',
+            },
           },
         });
 

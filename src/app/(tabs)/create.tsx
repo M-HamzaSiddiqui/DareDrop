@@ -25,6 +25,7 @@ interface FormState {
   title: string;
   description: string;
   category: CategoryKey | '';
+  challengeType: 'daily' | 'one_time';
   durationDays: number;
   useCustomDeadline: boolean;
   customDays: string;
@@ -46,6 +47,7 @@ export default function CreateScreen() {
     title: '',
     description: '',
     category: '',
+    challengeType: 'daily',
     durationDays: 14,
     useCustomDeadline: false,
     customDays: '45',
@@ -130,6 +132,7 @@ export default function CreateScreen() {
         durationDays: effectiveDurationDays,
         endsAt,
         creator: 'You',
+        challengeType: form.challengeType,
       });
 
       await refreshChallenges().catch(() => {});
@@ -148,6 +151,7 @@ export default function CreateScreen() {
       title: '',
       description: '',
       category: '',
+      challengeType: 'daily',
       durationDays: 14,
       useCustomDeadline: false,
       customDays: '45',
@@ -246,6 +250,67 @@ export default function CreateScreen() {
             accessibilityLabel="Challenge description"
             editable={!isSubmitting}
           />
+        </FormField>
+
+        {/* Dare Type selector */}
+        <FormField label="Dare Type" required>
+          <View style={styles.typeSelectorRow}>
+            <Pressable
+              onPress={() => {
+                if (isSubmitting) return;
+                setForm((f) => ({ ...f, challengeType: 'daily' }));
+              }}
+              style={({ pressed }) => [
+                styles.typeCard,
+                form.challengeType === 'daily' && styles.typeCardActive,
+                pressed && { opacity: 0.8 },
+              ]}
+              accessibilityRole="radio"
+              accessibilityLabel="Daily Dare"
+              accessibilityState={{ checked: form.challengeType === 'daily' }}>
+              <View style={styles.typeHeaderRow}>
+                <Text style={styles.typeEmoji}>🔥</Text>
+                <Text
+                  style={[
+                    styles.typeTitle,
+                    form.challengeType === 'daily' && styles.typeTitleActive,
+                  ]}>
+                  Daily Dare
+                </Text>
+              </View>
+              <Text style={styles.typeDescription}>
+                Recurring daily progress and verification. Build a streak day by day.
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => {
+                if (isSubmitting) return;
+                setForm((f) => ({ ...f, challengeType: 'one_time' }));
+              }}
+              style={({ pressed }) => [
+                styles.typeCard,
+                form.challengeType === 'one_time' && styles.typeCardActive,
+                pressed && { opacity: 0.8 },
+              ]}
+              accessibilityRole="radio"
+              accessibilityLabel="One-Time Dare"
+              accessibilityState={{ checked: form.challengeType === 'one_time' }}>
+              <View style={styles.typeHeaderRow}>
+                <Text style={styles.typeEmoji}>🎯</Text>
+                <Text
+                  style={[
+                    styles.typeTitle,
+                    form.challengeType === 'one_time' && styles.typeTitleActive,
+                  ]}>
+                  One-Time Dare
+                </Text>
+              </View>
+              <Text style={styles.typeDescription}>
+                One milestone, verified once. Complete the dare before the target deadline.
+              </Text>
+            </Pressable>
+          </View>
         </FormField>
 
         {/* Category selector */}
@@ -683,6 +748,42 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: DD.lime,
     fontWeight: '700',
+  },
+  typeSelectorRow: {
+    gap: DD.s2,
+  },
+  typeCard: {
+    backgroundColor: DD.bgCard,
+    borderWidth: 1.5,
+    borderColor: DD.border,
+    borderRadius: DD.radiusLg,
+    padding: DD.s3,
+  },
+  typeCardActive: {
+    borderColor: DD.lime,
+    backgroundColor: DD.lime + '14',
+  },
+  typeHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD.s2,
+    marginBottom: 4,
+  },
+  typeEmoji: {
+    fontSize: 18,
+  },
+  typeTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: DD.textSub,
+  },
+  typeTitleActive: {
+    color: DD.lime,
+  },
+  typeDescription: {
+    fontSize: 12,
+    color: DD.textMuted,
+    lineHeight: 16,
   },
   submitButton: {
     backgroundColor: DD.lime,
