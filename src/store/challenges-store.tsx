@@ -818,10 +818,14 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
       }
 
       // Offline / Local mock fallback
+      const targetChallenge = challengesRef.current.find((c) => c.id === params.challengeId);
+      const derivedChallengeType: 'daily' | 'one_time' =
+        targetChallenge?.challengeType === 'one_time' ? 'one_time' : 'daily';
+
       const offlineCompletion: DbCompletion = {
         id: 'local_comp_' + Date.now().toString(36),
         challenge_id: params.challengeId,
-        challenge_type: 'daily',
+        challenge_type: derivedChallengeType,
         participant_id: currentUserIdRef.current || 'local_user',
         verifier_id: params.verifierId,
         completion_date: params.completionDate,

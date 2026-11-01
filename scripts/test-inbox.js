@@ -148,6 +148,7 @@ async function runInboxTests() {
   };
 
   // Mock Supabase
+  let mockCurrentUserId = 'test-user-inbox-1';
   let mockRpcResponses = {};
   const mockSupabase = {
     rpc: async (fnName, params) => {
@@ -167,6 +168,7 @@ async function runInboxTests() {
       return {
         isSupabaseConfigured: true,
         supabase: mockSupabase,
+        getOrCreateCurrentUserId: async () => mockCurrentUserId,
       };
     }
     return require(mod);
@@ -179,6 +181,12 @@ async function runInboxTests() {
     fetchUnreadNotificationCount,
     markNotificationAsRead,
     markAllNotificationsAsRead,
+    getLocalReadNotificationIds,
+    saveLocalReadNotificationId,
+    saveMultipleLocalReadNotificationIds,
+    removeLocalReadNotificationIds,
+    getNotificationReadsKey,
+    LEGACY_UNSCOPED_NOTIFICATION_READS_KEY,
   } = inboxExports;
 
   // Route resolver tests
@@ -357,10 +365,10 @@ async function runInboxTests() {
   check(afterReadItems[0].readAt !== null, 'Item 1 has valid readAt timestamp');
 
   // Verify persistence across simulated app reopen / local reload
-  const localReadsKey = '@daredrop/local_notification_reads_v1';
+  const localReadsKey = getNotificationReadsKey('test-user-inbox-1');
   check(
     mockStorage[localReadsKey] && mockStorage[localReadsKey].includes('notif-1'),
-    'Read state is persisted into local storage for offline recovery & consistency',
+    'Read state is persisted into user-scoped local storage for offline recovery & consistency',
   );
 
   // Idempotency check: calling markNotificationAsRead again on already-read item
@@ -427,6 +435,103 @@ async function runInboxTests() {
   });
   const failureCount = await fetchUnreadNotificationCount();
   check(failureCount === 0, 'Network failure on unread count returns 0 gracefully');
+
+  // =========================================================================
+  // Test Suite 5: Offline Read-State Scoping & Account Isolation
+  // =========================================================================
+  console.log('\n[Test Suite 5] Offline Read-State Scoping & Account Isolation:');
+
+  // Clear mock storage to begin isolation tests with clean state
+  mockStorage = {};
+
+  // 1. Two different user IDs have isolated offline notification read-state
+  const userAlice = 'user_alice_uuid';
+  const userBob = 'user_bob_uuid';
+
+  await saveLocalReadNotificationId('notif-alice-101', userAlice);
+  await saveLocalReadNotificationId('notif-bob-202', userBob);
+
+  const aliceReads = await getLocalReadNotificationIds(userAlice);
+  const bobReads = await getLocalReadNotificationIds(userBob);
+
+  check(
+    aliceReads.has('notif-alice-101') && !aliceReads.has('notif-bob-202'),
+    'User Alice has only her read notifications and cannot see Bob notifications',
+  );
+  check(
+    bobReads.has('notif-bob-202') && !bobReads.has('notif-alice-101'),
+    'User Bob has only his read notifications and cannot see Alice notifications',
+  );
+
+  const aliceKey = getNotificationReadsKey(userAlice);
+  const bobKey = getNotificationReadsKey(userBob);
+  check(aliceKey !== bobKey, 'Storage keys for Alice and Bob are strictly distinct');
+  check(aliceKey === `@daredrop/local_notification_reads_v1:${userAlice}`, 'Alice storage key is properly scoped with her UID');
+  check(bobKey === `@daredrop/local_notification_reads_v1:${userBob}`, 'Bob storage key is properly scoped with his UID');
+
+  // 2. The same user retains their own notification read-state across repeated reads/writes
+  await saveMultipleLocalReadNotificationIds(['notif-alice-102', 'notif-alice-103'], userAlice);
+  const aliceReadsAfterMulti = await getLocalReadNotificationIds(userAlice);
+  check(
+    aliceReadsAfterMulti.size === 3 &&
+      aliceReadsAfterMulti.has('notif-alice-101') &&
+      aliceReadsAfterMulti.has('notif-alice-102') &&
+      aliceReadsAfterMulti.has('notif-alice-103'),
+    'The same user retains all cumulative notification reads across multiple writes',
+  );
+
+  // Remove confirmed read for Alice
+  await removeLocalReadNotificationIds(['notif-alice-101'], userAlice);
+  const aliceReadsAfterPrune = await getLocalReadNotificationIds(userAlice);
+  check(
+    aliceReadsAfterPrune.size === 2 &&
+      !aliceReadsAfterPrune.has('notif-alice-101') &&
+      aliceReadsAfterPrune.has('notif-alice-102') &&
+      aliceReadsAfterPrune.has('notif-alice-103'),
+    'Pruning read state operates only on the targeted user and preserves remaining reads',
+  );
+
+  // Confirm Bob is completely untouched by Alice prune
+  const bobReadsAfterAlicePrune = await getLocalReadNotificationIds(userBob);
+  check(
+    bobReadsAfterAlicePrune.size === 1 && bobReadsAfterAlicePrune.has('notif-bob-202'),
+    'Bob read state remains completely unaffected by Alice write or prune operations',
+  );
+
+  // 3. Guest or missing-identity behavior does not fall back to shared cross-account storage
+  const guestKey = getNotificationReadsKey('guest');
+  const emptyKey = getNotificationReadsKey('');
+  const nullKey = getNotificationReadsKey(null);
+  const undefinedKey = getNotificationReadsKey(undefined);
+
+  check(guestKey === '@daredrop/local_notification_reads_v1:guest', 'Guest key is scoped to :guest');
+  check(emptyKey === '@daredrop/local_notification_reads_v1:guest', 'Empty string identity maps safely to :guest');
+  check(nullKey === '@daredrop/local_notification_reads_v1:guest', 'Null identity maps safely to :guest');
+  check(undefinedKey === '@daredrop/local_notification_reads_v1:guest', 'Undefined identity maps safely to :guest');
+
+  await saveLocalReadNotificationId('notif-guest-303', 'guest');
+  const guestReads = await getLocalReadNotificationIds('guest');
+  check(guestReads.has('notif-guest-303'), 'Guest can store and read guest notifications');
+  check(!guestReads.has('notif-bob-202'), 'Guest cannot see Bob notifications');
+  check(!guestReads.has('notif-alice-102'), 'Guest cannot see Alice notifications');
+
+  // Verify missing identity dynamically falling back to guest without overwriting registered user
+  mockCurrentUserId = ''; // simulate logged-out / unauthenticated state
+  const missingIdentityReads = await getLocalReadNotificationIds();
+  check(
+    missingIdentityReads.has('notif-guest-303'),
+    'Missing identity safely resolves to isolated guest storage',
+  );
+  check(
+    !missingIdentityReads.has('notif-alice-102') && !missingIdentityReads.has('notif-bob-202'),
+    'Missing identity does not leak or touch authenticated user notification read-state',
+  );
+
+  // 4. Legacy unscoped key is not touched or written to
+  check(
+    mockStorage[LEGACY_UNSCOPED_NOTIFICATION_READS_KEY] === undefined,
+    'Legacy unscoped key @daredrop/local_notification_reads_v1 remains untouched and unused',
+  );
 
   // =========================================================================
   // Summary

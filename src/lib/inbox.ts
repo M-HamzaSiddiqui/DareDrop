@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { isSupabaseConfigured, supabase } from './supabase';
+import { getOrCreateCurrentUserId, isSupabaseConfigured, supabase } from './supabase';
 
 export interface AppNotification {
   id: string;
@@ -22,15 +22,42 @@ export interface AppNotification {
   rejectionReason?: string | null;
 }
 
-const LOCAL_NOTIFICATION_READS_KEY = '@daredrop/local_notification_reads_v1';
+export const LEGACY_UNSCOPED_NOTIFICATION_READS_KEY = '@daredrop/local_notification_reads_v1';
 const LOCAL_MOCK_NOTIFICATIONS_KEY = '@daredrop/local_mock_notifications_v1';
 
 /**
- * Returns locally marked read notification IDs from AsyncStorage.
+ * Returns the UID-scoped AsyncStorage key for local notification reads.
+ * Unauthenticated or guest sessions map explicitly to ':guest', avoiding cross-account contamination.
  */
-export async function getLocalReadNotificationIds(): Promise<Set<string>> {
+export function getNotificationReadsKey(uid?: string | null): string {
+  const trimmed = uid?.trim();
+  return `@daredrop/local_notification_reads_v1:${trimmed || 'guest'}`;
+}
+
+async function resolveNotificationUserId(uid?: string | null): Promise<string> {
+  if (uid && uid.trim()) {
+    return uid.trim();
+  }
   try {
-    const raw = await AsyncStorage.getItem(LOCAL_NOTIFICATION_READS_KEY);
+    if (typeof getOrCreateCurrentUserId === 'function') {
+      const currentId = await getOrCreateCurrentUserId();
+      if (currentId && currentId.trim()) {
+        return currentId.trim();
+      }
+    }
+  } catch {
+    // Fall through to guest identity
+  }
+  return 'guest';
+}
+
+/**
+ * Returns locally marked read notification IDs from AsyncStorage scoped by user ID.
+ */
+export async function getLocalReadNotificationIds(userId?: string | null): Promise<Set<string>> {
+  try {
+    const resolvedUid = await resolveNotificationUserId(userId);
+    const raw = await AsyncStorage.getItem(getNotificationReadsKey(resolvedUid));
     if (!raw) return new Set();
     const arr = JSON.parse(raw);
     return new Set(Array.isArray(arr) ? arr : []);
@@ -40,26 +67,28 @@ export async function getLocalReadNotificationIds(): Promise<Set<string>> {
 }
 
 /**
- * Persists locally marked read notification IDs to AsyncStorage.
+ * Persists locally marked read notification IDs to AsyncStorage scoped by user ID.
  */
-export async function saveLocalReadNotificationId(id: string): Promise<void> {
+export async function saveLocalReadNotificationId(id: string, userId?: string | null): Promise<void> {
   try {
-    const set = await getLocalReadNotificationIds();
+    const resolvedUid = await resolveNotificationUserId(userId);
+    const set = await getLocalReadNotificationIds(resolvedUid);
     set.add(id);
-    await AsyncStorage.setItem(LOCAL_NOTIFICATION_READS_KEY, JSON.stringify(Array.from(set)));
+    await AsyncStorage.setItem(getNotificationReadsKey(resolvedUid), JSON.stringify(Array.from(set)));
   } catch {
     // Ignore storage errors in non-standard environments
   }
 }
 
 /**
- * Persists multiple read notification IDs to AsyncStorage.
+ * Persists multiple read notification IDs to AsyncStorage scoped by user ID.
  */
-export async function saveMultipleLocalReadNotificationIds(ids: string[]): Promise<void> {
+export async function saveMultipleLocalReadNotificationIds(ids: string[], userId?: string | null): Promise<void> {
   try {
-    const set = await getLocalReadNotificationIds();
+    const resolvedUid = await resolveNotificationUserId(userId);
+    const set = await getLocalReadNotificationIds(resolvedUid);
     ids.forEach((id) => set.add(id));
-    await AsyncStorage.setItem(LOCAL_NOTIFICATION_READS_KEY, JSON.stringify(Array.from(set)));
+    await AsyncStorage.setItem(getNotificationReadsKey(resolvedUid), JSON.stringify(Array.from(set)));
   } catch {
     // Ignore
   }
@@ -68,9 +97,10 @@ export async function saveMultipleLocalReadNotificationIds(ids: string[]): Promi
 /**
  * Removes confirmed read notification IDs from AsyncStorage so local state does not accumulate indefinitely.
  */
-export async function removeLocalReadNotificationIds(ids: string[]): Promise<void> {
+export async function removeLocalReadNotificationIds(ids: string[], userId?: string | null): Promise<void> {
   try {
-    const set = await getLocalReadNotificationIds();
+    const resolvedUid = await resolveNotificationUserId(userId);
+    const set = await getLocalReadNotificationIds(resolvedUid);
     let changed = false;
     ids.forEach((id) => {
       if (set.has(id)) {
@@ -79,7 +109,7 @@ export async function removeLocalReadNotificationIds(ids: string[]): Promise<voi
       }
     });
     if (changed) {
-      await AsyncStorage.setItem(LOCAL_NOTIFICATION_READS_KEY, JSON.stringify(Array.from(set)));
+      await AsyncStorage.setItem(getNotificationReadsKey(resolvedUid), JSON.stringify(Array.from(set)));
     }
   } catch {
     // Ignore
@@ -140,8 +170,10 @@ export function formatNotificationTimestamp(iso: string | null | undefined): str
 export async function fetchUserNotifications(
   limit: number = 30,
   offset: number = 0,
+  userId?: string | null,
 ): Promise<AppNotification[]> {
-  const localReads = await getLocalReadNotificationIds();
+  const resolvedUid = await resolveNotificationUserId(userId);
+  const localReads = await getLocalReadNotificationIds(resolvedUid);
 
   if (!isSupabaseConfigured || !supabase) {
     // Local / Offline fallback
@@ -209,7 +241,7 @@ export async function fetchUserNotifications(
 
     // Prune confirmed reads asynchronously
     if (idsToPrune.length > 0) {
-      removeLocalReadNotificationIds(idsToPrune).catch(() => {});
+      removeLocalReadNotificationIds(idsToPrune, resolvedUid).catch(() => {});
     }
 
     // Sync pending offline reads to server
@@ -234,8 +266,9 @@ export async function fetchUserNotifications(
 /**
  * Retrieves the count of unread notifications for badge presentation.
  */
-export async function fetchUnreadNotificationCount(): Promise<number> {
-  const localReads = await getLocalReadNotificationIds();
+export async function fetchUnreadNotificationCount(userId?: string | null): Promise<number> {
+  const resolvedUid = await resolveNotificationUserId(userId);
+  const localReads = await getLocalReadNotificationIds(resolvedUid);
 
   if (!isSupabaseConfigured || !supabase) {
     try {
@@ -269,11 +302,15 @@ export async function fetchUnreadNotificationCount(): Promise<number> {
 /**
  * Marks a specific notification as read.
  */
-export async function markNotificationAsRead(notificationId: string): Promise<boolean> {
+export async function markNotificationAsRead(
+  notificationId: string,
+  userId?: string | null,
+): Promise<boolean> {
   if (!notificationId) return false;
 
+  const resolvedUid = await resolveNotificationUserId(userId);
   // Persist locally first for instant UI response and offline consistency
-  await saveLocalReadNotificationId(notificationId);
+  await saveLocalReadNotificationId(notificationId, resolvedUid);
 
   if (!isSupabaseConfigured || !supabase) {
     return true;
@@ -299,9 +336,13 @@ export async function markNotificationAsRead(notificationId: string): Promise<bo
 /**
  * Marks all notifications as read for the active user.
  */
-export async function markAllNotificationsAsRead(currentNotificationIds?: string[]): Promise<number> {
+export async function markAllNotificationsAsRead(
+  currentNotificationIds?: string[],
+  userId?: string | null,
+): Promise<number> {
+  const resolvedUid = await resolveNotificationUserId(userId);
   if (currentNotificationIds && currentNotificationIds.length > 0) {
-    await saveMultipleLocalReadNotificationIds(currentNotificationIds);
+    await saveMultipleLocalReadNotificationIds(currentNotificationIds, resolvedUid);
   }
 
   if (!isSupabaseConfigured || !supabase) {

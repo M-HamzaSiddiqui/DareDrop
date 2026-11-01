@@ -1,6 +1,6 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
@@ -10,13 +10,18 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Text,
   TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { CATEGORY_COLORS, CATEGORY_EMOJIS, CategoryKey, DD } from '@/constants/dd-theme';
+import {
+  CATEGORY_COLORS,
+  CategoryKey,
+  DD_COLORS,
+  DD_RADII,
+  DD_SPACING,
+} from '@/constants/dd-theme';
 import {
   calculateProgress,
   Challenge,
@@ -52,7 +57,35 @@ import {
 } from '@/lib/friends';
 import { useAuth } from '@/lib/auth-context';
 import { useChallenges } from '@/store/challenges-store';
+import { DDAvatar } from '@/components/ui/dd-avatar';
+import { DDBadge } from '@/components/ui/dd-badge';
+import { DDButton } from '@/components/ui/dd-button';
+import { DDCard } from '@/components/ui/dd-card';
+import { DDIcon, type DDIconName } from '@/components/ui/dd-icon';
+import { DDText } from '@/components/ui/dd-text';
 
+const CATEGORY_ICONS: Record<CategoryKey, DDIconName> = {
+  Fitness: 'flame',
+  Focus: 'target',
+  Fun: 'sparkle',
+  Learning: 'compass',
+};
+
+/**
+ * DareDrop Redesigned Challenge Details Screen.
+ *
+ * Implements:
+ * - Clean dark-first aesthetic with Neon Lime and Electric Violet accents
+ * - Header navigation with Phosphor icons, share action, and joined status
+ * - Hero banner with category/type badges and creator attribution
+ * - 3-metric statistics grid (Challengers, Time Left, Duration)
+ * - Verified progress tracker with streak flame indicator and progress bar
+ * - Peer verification proof submission card with WhatsApp handoff and real-time status banners
+ * - Verifier review queue for assigned peer approvals
+ * - User submission log with verifier reassignment and resubmission triggers
+ * - Friend invitation card with direct invite modal and deep-link copying
+ * - Sticky bottom CTA with safe-area clearance
+ */
 export default function ChallengeDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const {
@@ -199,7 +232,6 @@ export default function ChallengeDetailScreen() {
   }, [challengeId, fetchCompletions, fetchEligibleVerifiers, fetchParticipantProgress]);
 
   // Live Supabase Realtime subscription for this challenge's completions
-  // Instantly updates status, streak, progress, and review cards when submissions are made, reviewed, or reassigned
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase || !challengeId) return;
 
@@ -239,8 +271,10 @@ export default function ChallengeDetailScreen() {
     return (
       <View style={[styles.root, styles.centerContainer]}>
         <StatusBar style="light" />
-        <ActivityIndicator size="large" color={DD.lime} />
-        <Text style={styles.loadingText}>Loading challenge…</Text>
+        <ActivityIndicator size="large" color={DD_COLORS.lime} />
+        <DDText variant="body" color="secondary" style={styles.loadingText}>
+          Loading challenge…
+        </DDText>
       </View>
     );
   }
@@ -249,24 +283,28 @@ export default function ChallengeDetailScreen() {
     return (
       <View style={[styles.root, styles.notFound]}>
         <StatusBar style="light" />
-        <Text style={styles.notFoundIcon}>🔍</Text>
-        <Text style={styles.notFoundText}>Challenge not found</Text>
-        <Text style={styles.notFoundSubtext}>
+        <View style={styles.notFoundIconCircle}>
+          <DDIcon name="search" size={40} color={DD_COLORS.textMuted} weight="bold" />
+        </View>
+        <DDText variant="h2" color="primary">
+          Challenge not found
+        </DDText>
+        <DDText variant="bodySm" color="secondary" align="center" style={styles.notFoundSubtext}>
           This challenge may have been removed or the link is invalid.
-        </Text>
-        <Pressable
+        </DDText>
+        <DDButton
+          title="Go Back"
+          variant="secondary"
+          iconLeft="arrow-left"
           onPress={handleBack}
-          style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.8 }]}
-          accessibilityRole="button"
-          accessibilityLabel="Go back">
-          <Text style={styles.backBtnText}>← Go Back</Text>
-        </Pressable>
+          style={styles.backBtn}
+        />
       </View>
     );
   }
 
-  const catColor = CATEGORY_COLORS[challenge.category as CategoryKey] || DD.lime;
-  const emoji = CATEGORY_EMOJIS[challenge.category as CategoryKey] || '⚡';
+  const catColor = CATEGORY_COLORS[challenge.category as CategoryKey] || DD_COLORS.lime;
+  const catIcon = CATEGORY_ICONS[challenge.category as CategoryKey] || 'sparkle';
   const timeLeft = timeRemaining(challenge.endsAt);
 
   const { daysElapsed, progressPct: timeProgressPct } = calculateProgress(
@@ -278,7 +316,6 @@ export default function ChallengeDetailScreen() {
   const challengeDates = getChallengeDates(challenge.timezone || 'UTC');
   const todayDate = challengeDates.today;
   const yesterdayDate = challengeDates.yesterday;
-
 
   // Completion statuses (derived from user's OWN submissions)
   const isDaily = challenge.challengeType !== 'one_time';
@@ -308,7 +345,7 @@ export default function ChallengeDetailScreen() {
     if (!challenge) return;
     const res = await copyInviteLink(challenge);
     if (res.success) {
-      setCopiedToast('✓ Invite link copied to clipboard!');
+      setCopiedToast('Invite link copied to clipboard!');
       setTimeout(() => setCopiedToast(null), 3000);
     }
   }
@@ -343,7 +380,7 @@ export default function ChallengeDetailScreen() {
     try {
       await sendChallengeInvitation(challenge.id, friend.friend_user_id);
       setInvitedFriendIds((prev) => new Set([...prev, friend.friend_user_id]));
-      setCopiedToast(`⚡ Invitation sent to ${friend.display_name}!`);
+      setCopiedToast(`Invitation sent to ${friend.display_name}!`);
       setTimeout(() => setCopiedToast(null), 3000);
     } catch (err: any) {
       setInviteFriendError(translateSocialError(err));
@@ -362,7 +399,7 @@ export default function ChallengeDetailScreen() {
     try {
       const res = await joinChallenge(challenge.id);
       if (res.success) {
-        setCopiedToast(res.joined ? '🎉 Welcome to the challenge!' : 'You left this challenge');
+        setCopiedToast(res.joined ? 'Welcome to the challenge!' : 'You left this challenge');
         setTimeout(() => setCopiedToast(null), 2500);
         if (res.joined) {
           await refreshVerificationData();
@@ -415,7 +452,7 @@ export default function ChallengeDetailScreen() {
       }
 
       setSubmitSuccess(result.completion);
-      setCopiedToast('✓ Completion submitted for review!');
+      setCopiedToast('Completion submitted for review!');
       setTimeout(() => setCopiedToast(null), 3000);
       await refreshVerificationData();
     } catch (err: any) {
@@ -463,7 +500,7 @@ export default function ChallengeDetailScreen() {
 
       setReassignModalVisible(false);
       setReassigningCompletion(null);
-      setCopiedToast('✓ Verifier reassigned successfully!');
+      setCopiedToast('Verifier reassigned successfully!');
       setTimeout(() => setCopiedToast(null), 3000);
       await refreshVerificationData();
     } catch (err: any) {
@@ -486,15 +523,15 @@ export default function ChallengeDetailScreen() {
         decision: 'approved',
       });
       if (!res.success) {
-        setCopiedToast(`❌ ${res.error || 'Failed to approve'}`);
+        setCopiedToast(`Error: ${res.error || 'Failed to approve'}`);
         setTimeout(() => setCopiedToast(null), 3500);
         return;
       }
-      setCopiedToast('✓ Dare approved successfully!');
+      setCopiedToast('Dare approved successfully!');
       setTimeout(() => setCopiedToast(null), 3000);
       await Promise.all([refreshVerificationData(), refreshPendingReviews()]);
     } catch (err: any) {
-      setCopiedToast(`❌ ${err?.message || 'Error approving'}`);
+      setCopiedToast(`Error: ${err?.message || 'Error approving'}`);
       setTimeout(() => setCopiedToast(null), 3500);
     } finally {
       setIsReviewing(false);
@@ -521,7 +558,7 @@ export default function ChallengeDetailScreen() {
         rejectionReason: inlineRejectionReason.trim() || undefined,
       });
       if (!res.success) {
-        setCopiedToast(`❌ ${res.error || 'Failed to reject'}`);
+        setCopiedToast(`Error: ${res.error || 'Failed to reject'}`);
         setTimeout(() => setCopiedToast(null), 3500);
         return;
       }
@@ -531,7 +568,7 @@ export default function ChallengeDetailScreen() {
       setTimeout(() => setCopiedToast(null), 3000);
       await Promise.all([refreshVerificationData(), refreshPendingReviews()]);
     } catch (err: any) {
-      setCopiedToast(`❌ ${err?.message || 'Error rejecting'}`);
+      setCopiedToast(`Error: ${err?.message || 'Error rejecting'}`);
       setTimeout(() => setCopiedToast(null), 3500);
     } finally {
       setIsReviewing(false);
@@ -551,34 +588,37 @@ export default function ChallengeDetailScreen() {
 
       {/* Floating feedback toast */}
       {copiedToast ? (
-        <View style={[styles.toastContainer, { top: insets.top + DD.s6 }]}>
-          <Text style={styles.toastText}>{copiedToast}</Text>
+        <View style={[styles.toastContainer, { top: insets.top + DD_SPACING.sm }]}>
+          <DDIcon name="check-circle" size={16} color={DD_COLORS.lime} weight="fill" />
+          <DDText variant="caption" color="lime" bold style={styles.toastText}>
+            {copiedToast}
+          </DDText>
         </View>
       ) : null}
 
-      {/* Back button floating header */}
-      <View style={[styles.navBar, { paddingTop: insets.top + DD.s2 }]}>
+      {/* Header navigation bar */}
+      <View style={[styles.navBar, { paddingTop: insets.top + DD_SPACING.xs }]}>
         <Pressable
           onPress={handleBack}
-          style={({ pressed }) => [styles.backPill, pressed && { opacity: 0.75 }]}
+          android_ripple={{ color: 'rgba(255, 255, 255, 0.12)', borderless: true, radius: 24 }}
+          style={styles.navIconButton}
           accessibilityRole="button"
           accessibilityLabel="Go back">
-          <Text style={styles.backPillText}>← Back</Text>
+          <DDIcon name="arrow-left" size={20} color={DD_COLORS.text} weight="bold" />
         </Pressable>
 
         <View style={styles.navRight}>
           <Pressable
             onPress={handleShare}
-            style={({ pressed }) => [styles.shareNavBtn, pressed && { opacity: 0.75 }]}
+            android_ripple={{ color: 'rgba(255, 255, 255, 0.12)', borderless: true, radius: 24 }}
+            style={styles.navIconButton}
             accessibilityRole="button"
             accessibilityLabel="Share challenge">
-            <Text style={styles.shareNavBtnText}>📤 Share</Text>
+            <DDIcon name="share" size={20} color={DD_COLORS.text} weight="bold" />
           </Pressable>
 
           {challenge.joined && (
-            <View style={styles.joinedPill}>
-              <Text style={styles.joinedPillText}>✓ Joined</Text>
-            </View>
+            <DDBadge label="Joined" variant="success" size="sm" icon="check" />
           )}
         </View>
       </View>
@@ -587,233 +627,318 @@ export default function ChallengeDetailScreen() {
         style={styles.scroll}
         contentContainerStyle={[
           styles.content,
-          { paddingBottom: insets.bottom + 160 },
+          { paddingBottom: insets.bottom + 110 },
         ]}
         showsVerticalScrollIndicator={false}>
-        {/* Hero section */}
-        <View style={[styles.hero, { borderBottomColor: catColor }]}>
-          <View style={[styles.categoryTag, { backgroundColor: catColor + '22' }]}>
-            <Text style={[styles.categoryTagText, { color: catColor }]}>
-              {emoji} {challenge.category} • {isDaily ? 'Daily Dare' : 'One-Time Dare'}
-            </Text>
+        {/* A. Challenge Hero Section */}
+        <View style={[styles.heroCard, { borderColor: catColor + '44' }]}>
+          <View style={[styles.heroAccentBar, { backgroundColor: catColor }]} />
+
+          <View style={styles.heroBody}>
+            {/* Badges Row */}
+            <View style={styles.heroBadgesRow}>
+              <View style={[styles.categoryPill, { backgroundColor: catColor + '1E' }]}>
+                <DDIcon name={catIcon} size={13} color={catColor} weight="fill" />
+                <DDText variant="caption" style={[styles.categoryPillText, { color: catColor }]}>
+                  {challenge.category}
+                </DDText>
+              </View>
+
+              <View style={styles.typePill}>
+                <DDIcon
+                  name={isDaily ? 'flame' : 'target'}
+                  size={12}
+                  color={isDaily ? DD_COLORS.lime : DD_COLORS.purple}
+                  weight="bold"
+                />
+                <DDText
+                  variant="caption"
+                  color={isDaily ? 'lime' : 'purple'}
+                  style={styles.typePillText}>
+                  {isDaily ? 'Daily Dare' : 'One-Time Dare'}
+                </DDText>
+              </View>
+            </View>
+
+            {/* Title */}
+            <DDText variant="display" color="primary" style={styles.heroTitle}>
+              {challenge.title}
+            </DDText>
+
+            {/* Creator Attribution */}
+            <View style={styles.creatorRow}>
+              <DDAvatar name={challenge.creator} size="sm" />
+              <View style={styles.creatorMeta}>
+                <DDText variant="caption" color="muted">
+                  Created by
+                </DDText>
+                <DDText variant="label" color="primary" bold>
+                  {challenge.creator}
+                </DDText>
+              </View>
+            </View>
           </View>
-          <Text style={styles.title}>{challenge.title}</Text>
-          <Text style={styles.creatorText}>by {challenge.creator}</Text>
         </View>
 
-        {/* Stats grid */}
+        {/* B. Stats Grid */}
         <View style={styles.statsGrid}>
-          <DetailStat
-            icon="👥"
-            value={formatParticipants(challenge.participants)}
-            label="Challengers"
-            color={DD.purple}
-          />
-          <DetailStat
-            icon="⏱"
-            value={timeLeft}
-            label="Time left"
-            color={DD.catFun}
-          />
-          <DetailStat
-            icon="📅"
-            value={`${challenge.durationDays}d`}
-            label="Duration"
-            color={DD.lime}
-          />
+          <DDCard variant="card" padding="sm" style={styles.statBox}>
+            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(155, 89, 255, 0.12)' }]}>
+              <DDIcon name="users" size={16} color={DD_COLORS.purple} weight="bold" />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statValue}>
+              {formatParticipants(challenge.participants)}
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Challengers
+            </DDText>
+          </DDCard>
+
+          <DDCard variant="card" padding="sm" style={styles.statBox}>
+            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(255, 60, 172, 0.12)' }]}>
+              <DDIcon name="clock" size={16} color={DD_COLORS.catFun} weight="bold" />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statValue}>
+              {timeLeft}
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Remaining
+            </DDText>
+          </DDCard>
+
+          <DDCard variant="card" padding="sm" style={styles.statBox}>
+            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(191, 253, 64, 0.12)' }]}>
+              <DDIcon name="calendar" size={16} color={DD_COLORS.lime} weight="bold" />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statValue}>
+              {challenge.durationDays}d
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Duration
+            </DDText>
+          </DDCard>
         </View>
 
-        {/* Verified Progress Section */}
-        <View style={styles.section}>
+        {/* C. Verified Progress Section */}
+        <DDCard variant="card" padding="md" style={styles.sectionCard}>
           <View style={styles.progressHeader}>
-            <View>
-              <Text style={styles.sectionTitle}>
-                {challenge.joined ? 'Verified Progress' : 'Challenge Progress'}
-              </Text>
+            <View style={styles.progressHeaderLeft}>
+              <DDText variant="h3" color="primary">
+                {challenge.joined ? 'Verified Progress' : 'Challenge Timeline'}
+              </DDText>
               {displayStreak > 0 && (
                 <View style={styles.streakBadge}>
-                  <Text style={styles.streakText}>🔥 {displayStreak} Day Streak</Text>
+                  <DDIcon name="flame" size={14} color={DD_COLORS.lime} weight="fill" />
+                  <DDText variant="caption" color="lime" bold style={styles.streakText}>
+                    {displayStreak} Day Streak
+                  </DDText>
                 </View>
               )}
             </View>
-            <Text style={[styles.progressPct, { color: catColor }]}>
+            <DDText variant="h2" style={[styles.progressPctText, { color: catColor }]}>
               {displayProgressPct}%
-            </Text>
+            </DDText>
           </View>
 
+          {/* Progress Track */}
           <View style={styles.progressTrack}>
             <View
               style={[
                 styles.progressFill,
-                { width: `${displayProgressPct}%` as any, backgroundColor: catColor },
+                { width: `${Math.min(100, Math.max(0, displayProgressPct))}%` as any, backgroundColor: catColor },
               ]}
             />
           </View>
 
           <View style={styles.progressSubrow}>
-            <Text style={styles.progressLabel}>
+            <DDText variant="bodySm" color="secondary">
               {challenge.joined && participantProgress
                 ? isDaily
                   ? `${displayVerifiedCount} of ${challenge.durationDays} days verified`
                   : `${displayVerifiedCount > 0 ? '1 of 1' : '0 of 1'} dare verified`
                 : `${daysElapsed} of ${challenge.durationDays} days elapsed`}
-            </Text>
+            </DDText>
             {isCompletedVerified && (
-              <Text style={styles.completedBadgeText}>🏆 Completed!</Text>
+              <View style={styles.completedBadge}>
+                <DDIcon name="trophy" size={13} color={DD_COLORS.lime} weight="fill" />
+                <DDText variant="caption" color="lime" bold>
+                  Completed!
+                </DDText>
+              </View>
             )}
           </View>
 
           {challenge.joined && (
-            <Text style={styles.progressDisclaimer}>
-              ℹ️ Only verifier-approved submissions count toward your verified progress and streak.
-            </Text>
+            <View style={styles.disclaimerRow}>
+              <DDIcon name="info" size={13} color={DD_COLORS.textMuted} weight="bold" />
+              <DDText variant="caption" color="muted" style={styles.disclaimerText}>
+                Only verifier-approved submissions count toward your verified progress and streak.
+              </DDText>
+            </View>
           )}
-        </View>
+        </DDCard>
 
-        {/* PEER VERIFICATION & SUBMIT COMPLETION ACTION (For active participants) */}
+        {/* D. Peer Verification & Submit Section (for active participants) */}
         {challenge.joined && (
-          <View style={styles.submissionSectionCard}>
+          <DDCard variant="highlight" padding="md" style={styles.submissionSectionCard}>
             <View style={styles.cardHeaderRow}>
-              <View>
-                <View style={styles.badgeRow}>
-                  <Text style={styles.verificationBadge}>PEER VERIFICATION</Text>
-                  <Text style={styles.whatsappBadge}>💬 WhatsApp Proof</Text>
-                </View>
-                <Text style={styles.cardMainTitle}>Submit Challenge Completion</Text>
+              <View style={styles.verificationBadgesRow}>
+                <DDBadge label="Peer Verification" variant="purple" size="sm" icon="verify" />
+                <DDBadge label="WhatsApp Proof" variant="lime" size="sm" icon="share" />
               </View>
+              <DDText variant="h3" color="primary" style={styles.cardMainTitle}>
+                Submit Dare Proof
+              </DDText>
             </View>
 
-            <Text style={styles.cardDescription}>
-              Submissions require peer verification. Submit below, then send your proof photo or video to your assigned verifier via WhatsApp. Progress counts once approved.
-            </Text>
+            <DDText variant="bodySm" color="secondary" style={styles.cardDescription}>
+              Submissions require peer verification. Submit completion below, then send your proof photo or video to your assigned verifier via WhatsApp.
+            </DDText>
 
             {/* Daily Challenge Today Status Callouts */}
             {isDaily && isTodayApproved && (
-              <View style={[styles.statusBanner, styles.statusBannerApproved]}>
-                <Text style={styles.statusBannerIcon}>✅</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.statusBannerTitle}>Today is Verified!</Text>
-                  <Text style={styles.statusBannerSub}>
+              <View style={[styles.statusCallout, styles.statusCalloutApproved]}>
+                <DDIcon name="check-circle" size={20} color={DD_COLORS.success} weight="fill" />
+                <View style={styles.calloutTexts}>
+                  <DDText variant="label" color="success" bold>
+                    Today is Verified!
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
                     Your completion for today ({todayDate}) has been approved by your verifier.
-                  </Text>
+                  </DDText>
                 </View>
               </View>
             )}
 
             {isDaily && isTodayPending && (
-              <View style={[styles.statusBanner, styles.statusBannerPending]}>
-                <Text style={styles.statusBannerIcon}>⏳</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.statusBannerTitle}>Today is Pending Verification</Text>
-                  <Text style={styles.statusBannerSub}>
+              <View style={[styles.statusCallout, styles.statusCalloutPending]}>
+                <DDIcon name="clock" size={20} color={DD_COLORS.warning} weight="bold" />
+                <View style={styles.calloutTexts}>
+                  <DDText variant="label" color="warning" bold>
+                    Today is Pending Verification
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
                     Submitted for {todayDate}. Waiting for verifier approval.
-                  </Text>
+                  </DDText>
                   {todayCompletion && (
-                    <Pressable
+                    <DDButton
+                      title="Send WhatsApp Proof"
+                      variant="secondary"
+                      size="sm"
+                      iconLeft="share"
                       onPress={() => handleSendWhatsAppProof(todayCompletion)}
-                      style={styles.remindBtn}>
-                      <Text style={styles.remindBtnText}>📲 Send WhatsApp Proof</Text>
-                    </Pressable>
+                      style={styles.calloutActionBtn}
+                    />
                   )}
                 </View>
               </View>
             )}
 
             {isDaily && isTodayRejected && (
-              <View style={[styles.statusBanner, styles.statusBannerRejected]}>
-                <Text style={styles.statusBannerIcon}>❌</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.statusBannerTitle}>Submission Needs Resubmission</Text>
-                  <Text style={styles.statusBannerSub}>
+              <View style={[styles.statusCallout, styles.statusCalloutRejected]}>
+                <DDIcon name="warning" size={20} color={DD_COLORS.danger} weight="bold" />
+                <View style={styles.calloutTexts}>
+                  <DDText variant="label" color="danger" bold>
+                    Submission Needs Resubmission
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
                     Reason: {todayCompletion?.rejection_reason || 'Proof was not approved.'}
-                  </Text>
+                  </DDText>
                 </View>
               </View>
             )}
 
             {/* One-Time Dare Status Callouts */}
             {!isDaily && isOneTimeApproved && (
-              <View style={[styles.statusBanner, styles.statusBannerApproved]}>
-                <Text style={styles.statusBannerIcon}>🏆</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.statusBannerTitle}>Dare Completed & Verified!</Text>
-                  <Text style={styles.statusBannerSub}>
+              <View style={[styles.statusCallout, styles.statusCalloutApproved]}>
+                <DDIcon name="trophy" size={20} color={DD_COLORS.lime} weight="fill" />
+                <View style={styles.calloutTexts}>
+                  <DDText variant="label" color="lime" bold>
+                    Dare Completed & Verified!
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
                     Your completion has been approved. You conquered this dare!
-                  </Text>
+                  </DDText>
                 </View>
               </View>
             )}
 
             {!isDaily && isOneTimePending && (
-              <View style={[styles.statusBanner, styles.statusBannerPending]}>
-                <Text style={styles.statusBannerIcon}>⏳</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.statusBannerTitle}>Dare Submission Pending Review</Text>
-                  <Text style={styles.statusBannerSub}>
+              <View style={[styles.statusCallout, styles.statusCalloutPending]}>
+                <DDIcon name="clock" size={20} color={DD_COLORS.warning} weight="bold" />
+                <View style={styles.calloutTexts}>
+                  <DDText variant="label" color="warning" bold>
+                    Dare Submission Pending Review
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
                     Your completion is currently awaiting review by your verifier.
-                  </Text>
+                  </DDText>
                   {latestCompletion && (
-                    <Pressable
+                    <DDButton
+                      title="Send WhatsApp Proof"
+                      variant="secondary"
+                      size="sm"
+                      iconLeft="share"
                       onPress={() => handleSendWhatsAppProof(latestCompletion)}
-                      style={styles.remindBtn}>
-                      <Text style={styles.remindBtnText}>📲 Send WhatsApp Proof</Text>
-                    </Pressable>
+                      style={styles.calloutActionBtn}
+                    />
                   )}
                 </View>
               </View>
             )}
 
-            {/* Main Submit Button */}
-            {(!isOneTimeApproved && !isOneTimePending) && (
+            {/* Main Submit Action Buttons */}
+            {!isOneTimeApproved && !isOneTimePending && (
               <View style={styles.submitActionBox}>
-                <Pressable
-                  onPress={() => openSubmitModal()}
-                  style={({ pressed }) => [
-                    styles.primarySubmitBtn,
-                    pressed && { opacity: 0.88, transform: [{ scale: 0.98 }] },
-                  ]}
-                  accessibilityRole="button"
-                  accessibilityLabel="Submit Completion">
-                  <Text style={styles.primarySubmitBtnText}>
-                    {isTodayApproved
-                      ? '⚡ Submit Another Day'
+                <DDButton
+                  title={
+                    isTodayApproved
+                      ? 'Submit Another Day'
                       : isTodayRejected
-                        ? '🔄 Resubmit Today’s Completion'
-                        : '⚡ Submit Completion'}
-                  </Text>
-                </Pressable>
+                        ? 'Resubmit Today’s Completion'
+                        : 'Submit Completion'
+                  }
+                  variant="primary"
+                  iconLeft="plus"
+                  onPress={() => openSubmitModal()}
+                  fullWidth
+                />
 
-                {/* Quick option to submit yesterday for daily dare grace window */}
                 {isDaily && !yesterdayCompletion && isTodayApproved && (
-                  <Pressable
+                  <DDButton
+                    title={`Submit for Yesterday (${yesterdayDate})`}
+                    variant="outline"
+                    size="sm"
+                    iconLeft="clock"
                     onPress={() => openSubmitModal(yesterdayDate)}
-                    style={styles.yesterdayBtn}>
-                    <Text style={styles.yesterdayBtnText}>
-                      ⏮️ Submit for Yesterday ({yesterdayDate})
-                    </Text>
-                  </Pressable>
+                    style={styles.yesterdaySubmitBtn}
+                  />
                 )}
               </View>
             )}
-          </View>
+          </DDCard>
         )}
 
-        {/* SUBMISSIONS AWAITING REVIEW (for assigned verifiers) */}
+        {/* E. Submissions Awaiting Your Review (for assigned verifiers) */}
         {reviewableSubmissions.length > 0 && (
-          <View style={styles.reviewSectionCard}>
+          <DDCard variant="card" padding="md" style={styles.sectionCard}>
             <View style={styles.reviewSectionHeader}>
-              <View style={styles.reviewTitleRow}>
-                <Text style={styles.reviewIcon}>📋</Text>
-                <Text style={styles.reviewMainTitle}>Awaiting Your Review</Text>
-              </View>
-              <View style={styles.reviewBadge}>
-                <Text style={styles.reviewBadgeText}>{reviewableSubmissions.length} Pending</Text>
+              <View style={styles.reviewTitleGroup}>
+                <DDIcon name="verify" size={20} color={DD_COLORS.coral} weight="fill" />
+                <DDText variant="h3" color="primary">
+                  Awaiting Your Review
+                </DDText>
+                <DDBadge
+                  label={`${reviewableSubmissions.length} Pending`}
+                  variant="coral"
+                  size="sm"
+                />
               </View>
             </View>
 
-            <Text style={styles.reviewSubtext}>
+            <DDText variant="bodySm" color="secondary" style={styles.reviewSubtext}>
               You were selected as verifier for these completions. Confirm that the challenger sent you proof before approving.
-            </Text>
+            </DDText>
 
             <View style={styles.reviewList}>
               {reviewableSubmissions.map((item) => {
@@ -821,75 +946,76 @@ export default function ChallengeDetailScreen() {
                 return (
                   <View key={item.id} style={styles.reviewItemCard}>
                     <View style={styles.reviewItemTop}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.reviewSubmitterName}>{submitterName}</Text>
-                        <Text style={styles.reviewDateText}>
-                          Date: {item.completion_date} • {formatSubmittedAt(item.submitted_at)}
-                        </Text>
+                      <DDAvatar name={submitterName} size="sm" />
+                      <View style={styles.reviewItemMeta}>
+                        <DDText variant="label" color="primary" bold numberOfLines={1}>
+                          {submitterName}
+                        </DDText>
+                        <DDText variant="caption" color="muted">
+                          {item.completion_date} • {formatSubmittedAt(item.submitted_at)}
+                        </DDText>
                       </View>
-                      <View style={[styles.badgePill, styles.badgePending]}>
-                        <Text style={styles.badgePendingText}>⏳ Pending</Text>
-                      </View>
+                      <DDBadge label="Pending" variant="warning" size="sm" icon="clock" />
                     </View>
 
                     {item.submission_note ? (
                       <View style={styles.reviewNoteBox}>
-                        <Text style={styles.reviewNoteText}>&quot;{item.submission_note}&quot;</Text>
+                        <DDText variant="caption" color="secondary" style={styles.reviewNoteText}>
+                          &quot;{item.submission_note}&quot;
+                        </DDText>
                       </View>
                     ) : null}
 
-                    {/* Review actions */}
+                    {/* Review Actions Row */}
                     <View style={styles.reviewButtonsRow}>
-                      <Pressable
+                      <DDButton
+                        title="Approve"
+                        variant="primary"
+                        size="sm"
+                        iconLeft="check"
+                        loading={isReviewing}
                         onPress={() => handleQuickApprove(item)}
-                        disabled={isReviewing}
-                        style={({ pressed }) => [
-                          styles.quickApproveBtn,
-                          pressed && { opacity: 0.8 },
-                          isReviewing && { opacity: 0.6 },
-                        ]}
-                        accessibilityRole="button"
-                        accessibilityLabel="Approve submission">
-                        <Text style={styles.quickApproveText}>✓ Approve</Text>
-                      </Pressable>
+                        style={styles.reviewBtnFlex}
+                      />
 
-                      <Pressable
+                      <DDButton
+                        title="Reject"
+                        variant="destructive"
+                        size="sm"
+                        iconLeft="x"
+                        disabled={isReviewing}
                         onPress={() => openInlineRejectModal(item)}
-                        disabled={isReviewing}
-                        style={({ pressed }) => [
-                          styles.quickRejectBtn,
-                          pressed && { opacity: 0.8 },
-                          isReviewing && { opacity: 0.6 },
-                        ]}
-                        accessibilityRole="button"
-                        accessibilityLabel="Reject submission">
-                        <Text style={styles.quickRejectText}>✕ Reject</Text>
-                      </Pressable>
+                        style={styles.reviewBtnFlex}
+                      />
 
-                      <Pressable
+                      <DDButton
+                        title="Details"
+                        variant="ghost"
+                        size="sm"
+                        iconRight="arrow-right"
                         onPress={() =>
                           router.push({
                             pathname: '/review/[id]',
                             params: { id: item.id },
                           })
                         }
-                        style={styles.detailsReviewBtn}>
-                        <Text style={styles.detailsReviewBtnText}>Details →</Text>
-                      </Pressable>
+                      />
                     </View>
                   </View>
                 );
               })}
             </View>
-          </View>
+          </DDCard>
         )}
 
-        {/* SUBMISSION HISTORY & STATUS LIST (User's own records) */}
+        {/* F. Submissions & History (User's own records) */}
         {challenge.joined && userSubmissions.length > 0 && (
-          <View style={styles.historyCard}>
+          <DDCard variant="card" padding="md" style={styles.sectionCard}>
             <View style={styles.historyHeader}>
-              <Text style={styles.historyTitle}>Your Submissions & History</Text>
-              <Text style={styles.historyCount}>{userSubmissions.length} logged</Text>
+              <DDText variant="h3" color="primary">
+                Your Submission History
+              </DDText>
+              <DDBadge label={`${userSubmissions.length} logged`} variant="neutral" size="sm" />
             </View>
 
             <View style={styles.historyList}>
@@ -903,175 +1029,172 @@ export default function ChallengeDetailScreen() {
                   <View key={item.id} style={styles.historyItem}>
                     <View style={styles.historyItemTop}>
                       <View>
-                        <Text style={styles.historyDate}>
+                        <DDText variant="label" color="primary" bold>
                           {item.completion_date === todayDate
                             ? `Today (${item.completion_date})`
                             : item.completion_date === yesterdayDate
                               ? `Yesterday (${item.completion_date})`
                               : item.completion_date}
-                        </Text>
-                        <Text style={styles.historyVerifier}>
+                        </DDText>
+                        <DDText variant="caption" color="muted">
                           Verifier: {verifierName}
-                        </Text>
+                        </DDText>
                       </View>
 
                       {/* Status Badges */}
                       {item.status === 'approved' && (
-                        <View style={[styles.badgePill, styles.badgeApproved]}>
-                          <Text style={styles.badgeApprovedText}>✓ Approved</Text>
-                        </View>
+                        <DDBadge label="Approved" variant="success" size="sm" icon="check-circle" />
                       )}
                       {item.status === 'pending' && (
-                        <View style={[styles.badgePill, styles.badgePending]}>
-                          <Text style={styles.badgePendingText}>⏳ Pending</Text>
-                        </View>
+                        <DDBadge label="Pending" variant="warning" size="sm" icon="clock" />
                       )}
                       {item.status === 'rejected' && (
-                        <View style={[styles.badgePill, styles.badgeRejected]}>
-                          <Text style={styles.badgeRejectedText}>❌ Rejected</Text>
-                        </View>
+                        <DDBadge label="Rejected" variant="danger" size="sm" icon="x-circle" />
                       )}
                     </View>
 
                     {item.submission_note ? (
-                      <Text style={styles.historyNote}>
+                      <DDText variant="caption" color="secondary" style={styles.historyNote}>
                         Note: &quot;{item.submission_note}&quot;
-                      </Text>
+                      </DDText>
                     ) : null}
 
                     {item.rejection_reason && item.status === 'rejected' ? (
-                      <Text style={styles.rejectionReasonText}>
+                      <DDText variant="caption" color="danger" style={styles.rejectionReasonText}>
                         Feedback: {item.rejection_reason}
-                      </Text>
+                      </DDText>
                     ) : null}
 
-                    {/* Actions on items */}
+                    {/* Actions on history items */}
                     <View style={styles.historyActionsRow}>
                       {item.status === 'pending' && (
                         <>
-                          <Pressable
+                          <DDButton
+                            title="WhatsApp Proof"
+                            variant="secondary"
+                            size="sm"
+                            iconLeft="share"
                             onPress={() => handleSendWhatsAppProof(item)}
-                            style={styles.historyActionBtn}>
-                            <Text style={styles.historyActionBtnText}>💬 WhatsApp Proof</Text>
-                          </Pressable>
-                          <Pressable
+                          />
+                          <DDButton
+                            title="Reassign Verifier"
+                            variant="outline"
+                            size="sm"
+                            iconLeft="refresh"
                             onPress={() => openReassignModal(item)}
-                            style={styles.historyActionBtnSecondary}>
-                            <Text style={styles.historyActionBtnSecondaryText}>
-                              🔄 Reassign Verifier
-                            </Text>
-                          </Pressable>
+                          />
                         </>
                       )}
 
                       {item.status === 'rejected' && (
-                        <Pressable
+                        <DDButton
+                          title="Resubmit for this date"
+                          variant="primary"
+                          size="sm"
+                          iconLeft="refresh"
                           onPress={() => openSubmitModal(item.completion_date)}
-                          style={styles.historyActionBtn}>
-                          <Text style={styles.historyActionBtnText}>🔄 Resubmit for this date</Text>
-                        </Pressable>
+                        />
                       )}
                     </View>
                   </View>
                 );
               })}
             </View>
-          </View>
+          </DDCard>
         )}
 
-        {/* Invite Friends Card */}
-        <View style={styles.inviteCard}>
+        {/* G. Invite Challengers Section */}
+        <DDCard variant="card" padding="md" style={styles.sectionCard}>
           <View style={styles.inviteHeader}>
-            <View>
-              <Text style={styles.inviteTitle}>Invite Challengers</Text>
-              <Text style={styles.inviteSubtitle}>
+            <View style={styles.inviteHeaderLeft}>
+              <View style={styles.inviteTitleRow}>
+                <DDIcon name="friends" size={18} color={DD_COLORS.lime} weight="fill" />
+                <DDText variant="h3" color="primary">
+                  Invite Challengers
+                </DDText>
+              </View>
+              <DDText variant="bodySm" color="secondary">
                 Dares are 3x more likely to be completed with friends.
-              </Text>
+              </DDText>
             </View>
-            <Text style={styles.inviteBadge}>🔥 Active</Text>
           </View>
 
           <View style={styles.inviteButtonsRow}>
-            <Pressable
+            <DDButton
+              title="Copy Link"
+              variant="secondary"
+              size="sm"
+              iconLeft="copy"
               onPress={handleCopy}
-              style={({ pressed }) => [
-                styles.inviteBtn,
-                styles.inviteBtnCopy,
-                pressed && { opacity: 0.85 },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="Copy invite link">
-              <Text style={styles.inviteBtnCopyText}>🔗 Copy Link</Text>
-            </Pressable>
+              style={styles.inviteBtnFlex}
+            />
 
-            <Pressable
+            <DDButton
+              title="Share Dare"
+              variant="secondary"
+              size="sm"
+              iconLeft="share"
               onPress={handleShare}
-              style={({ pressed }) => [
-                styles.inviteBtn,
-                styles.inviteBtnShare,
-                pressed && { opacity: 0.85 },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="Native share challenge">
-              <Text style={styles.inviteBtnShareText}>📤 Share Dare</Text>
-            </Pressable>
+              style={styles.inviteBtnFlex}
+            />
 
-            <Pressable
+            <DDButton
+              title="Invite Friends"
+              variant="violet"
+              size="sm"
+              iconLeft="user-plus"
               onPress={openInviteFriendsModal}
-              style={({ pressed }) => [
-                styles.inviteBtn,
-                { backgroundColor: DD.purple + '22', borderColor: DD.purple },
-                pressed && { opacity: 0.85 },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="Invite accepted friends to challenge">
-              <Text style={[styles.inviteBtnShareText, { color: DD.purple }]}>👥 Invite Friends</Text>
-            </Pressable>
+              style={styles.inviteBtnFlex}
+            />
           </View>
 
-          {/* Toggle technical link details */}
+          {/* Toggle URL Details */}
           <Pressable
             onPress={() => setShowLinkInfo(!showLinkInfo)}
-            style={styles.linkInfoToggle}>
-            <Text style={styles.linkInfoToggleText}>
-              {showLinkInfo ? 'Hide URL details ▲' : 'Show URL & deep link details ▼'}
-            </Text>
+            style={styles.linkInfoToggle}
+            accessibilityRole="button">
+            <DDText variant="caption" color="lime" bold>
+              {showLinkInfo ? 'Hide deep link details ▲' : 'Show deep link details ▼'}
+            </DDText>
           </Pressable>
 
           {showLinkInfo && (
             <View style={styles.linkDetailsBox}>
               <View style={styles.urlItem}>
-                <Text style={styles.urlLabel}>Primary Invite URL:</Text>
-                <Text style={styles.urlValue} numberOfLines={2} selectable>
+                <DDText variant="caption" color="muted">
+                  Primary Invite URL:
+                </DDText>
+                <DDText variant="caption" color="primary" numberOfLines={2} selectable>
                   {inviteUrls.primaryUrl}
-                </Text>
+                </DDText>
               </View>
               <View style={styles.urlItem}>
-                <Text style={styles.urlLabel}>Native Deep Link:</Text>
-                <Text style={styles.urlValue} numberOfLines={2} selectable>
+                <DDText variant="caption" color="muted">
+                  Native Deep Link:
+                </DDText>
+                <DDText variant="caption" color="primary" numberOfLines={2} selectable>
                   {inviteUrls.deepLink}
-                </Text>
+                </DDText>
               </View>
-              <Text style={styles.urlNote}>
-                {inviteUrls.httpsUrl
-                  ? '🌐 Public HTTPS invite link active. Anyone can open this on web or mobile.'
-                  : 'ℹ️ Using local deep link scheme (`daredrop://`). Set EXPO_PUBLIC_APP_URL in .env to enable public HTTPS links.'}
-              </Text>
             </View>
           )}
-        </View>
+        </DDCard>
 
-        {/* Description */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>About this challenge</Text>
-          <View style={styles.descriptionCard}>
-            <Text style={styles.description}>{challenge.description}</Text>
-          </View>
-        </View>
+        {/* H. Description Section */}
+        <DDCard variant="card" padding="md" style={styles.sectionCard}>
+          <DDText variant="h3" color="primary" style={styles.sectionHeading}>
+            About this challenge
+          </DDText>
+          <DDText variant="body" color="secondary" style={styles.descriptionText}>
+            {challenge.description}
+          </DDText>
+        </DDCard>
 
-        {/* Rules */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>How it works</Text>
+        {/* I. Rules / How It Works */}
+        <DDCard variant="card" padding="md" style={styles.sectionCard}>
+          <DDText variant="h3" color="primary" style={styles.sectionHeading}>
+            How it works
+          </DDText>
           <View style={styles.rulesList}>
             {[
               'Commit to the duration before joining',
@@ -1080,63 +1203,52 @@ export default function ChallengeDetailScreen() {
               'Only verifier-approved submissions count toward your streak and badge',
             ].map((rule, i) => (
               <View key={i} style={styles.ruleItem}>
-                <View style={[styles.ruleNumber, { backgroundColor: catColor + '22' }]}>
-                  <Text style={[styles.ruleNumberText, { color: catColor }]}>{i + 1}</Text>
+                <View style={[styles.ruleNumberCircle, { backgroundColor: catColor + '22' }]}>
+                  <DDText variant="caption" bold style={{ color: catColor }}>
+                    {i + 1}
+                  </DDText>
                 </View>
-                <Text style={styles.ruleText}>{rule}</Text>
+                <DDText variant="bodySm" color="secondary" style={styles.ruleText}>
+                  {rule}
+                </DDText>
               </View>
             ))}
           </View>
-        </View>
+        </DDCard>
       </ScrollView>
 
-      {/* CTA Bottom Bar */}
-      <View style={[styles.ctaContainer, { paddingBottom: insets.bottom + DD.s4 }]}>
+      {/* Sticky Bottom CTA Bar */}
+      <View style={[styles.ctaContainer, { paddingBottom: insets.bottom + DD_SPACING.sm }]}>
         {challenge.joined ? (
           <View style={styles.joinedCtaRow}>
-            <Pressable
+            <DDButton
+              title="Submit Completion"
+              variant="primary"
+              iconLeft="plus"
               onPress={() => openSubmitModal()}
-              style={({ pressed }) => [
-                styles.bottomSubmitBtn,
-                pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="Submit Completion">
-              <Text style={styles.bottomSubmitBtnText}>⚡ Submit Completion</Text>
-            </Pressable>
+              style={styles.bottomMainBtn}
+            />
 
-            <Pressable
-              onPress={handleJoinToggle}
+            <DDButton
+              title="Leave"
+              variant="ghost"
+              loading={isJoining}
               disabled={isJoining}
-              style={styles.leaveTextBtn}>
-              {isJoining ? (
-                <ActivityIndicator color={DD.textMuted} size="small" />
-              ) : (
-                <Text style={styles.leaveText}>Leave Dare</Text>
-              )}
-            </Pressable>
+              onPress={handleJoinToggle}
+              style={styles.leaveDareBtn}
+            />
           </View>
         ) : (
-          <Pressable
-            onPress={handleJoinToggle}
+          <DDButton
+            title="Join Challenge"
+            variant="primary"
+            iconLeft="plus"
+            loading={isJoining}
             disabled={isJoining}
-            style={({ pressed }) => [
-              styles.ctaButton,
-              styles.ctaButtonJoin,
-              { backgroundColor: catColor },
-              pressed && !isJoining && { opacity: 0.88, transform: [{ scale: 0.98 }] },
-              isJoining && { opacity: 0.7 },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="Join challenge">
-            {isJoining ? (
-              <ActivityIndicator color={DD.bg} size="small" />
-            ) : (
-              <Text style={[styles.ctaText, styles.ctaTextJoin]}>
-                🚀 Join Challenge
-              </Text>
-            )}
-          </Pressable>
+            onPress={handleJoinToggle}
+            fullWidth
+            style={{ backgroundColor: catColor }}
+          />
         )}
       </View>
 
@@ -1152,53 +1264,69 @@ export default function ChallengeDetailScreen() {
           <View style={styles.modalContent}>
             {/* Modal Header */}
             <View style={styles.modalHeaderRow}>
-              <View>
-                <Text style={styles.modalTitle}>Submit Completion</Text>
-                <Text style={styles.modalSubtitle}>
+              <View style={styles.modalHeaderTexts}>
+                <DDText variant="h3" color="primary">
+                  Submit Completion
+                </DDText>
+                <DDText variant="caption" color="muted" numberOfLines={1}>
                   {challenge.title}
-                </Text>
+                </DDText>
               </View>
               <Pressable
                 onPress={() => setSubmitModalVisible(false)}
-                style={styles.modalCloseBtn}>
-                <Text style={styles.modalCloseBtnText}>✕</Text>
+                hitSlop={8}
+                style={styles.modalCloseBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Close modal">
+                <DDIcon name="x" size={18} color={DD_COLORS.textMuted} weight="bold" />
               </Pressable>
             </View>
 
             {submitSuccess ? (
               /* Success State */
               <View style={styles.successStateBox}>
-                <Text style={styles.successIcon}>🎉</Text>
-                <Text style={styles.successTitle}>Completion Submitted!</Text>
-                <Text style={styles.successMsg}>
+                <View style={styles.successIconCircle}>
+                  <DDIcon name="check-circle" size={44} color={DD_COLORS.lime} weight="fill" />
+                </View>
+                <DDText variant="h2" color="primary" align="center">
+                  Completion Submitted!
+                </DDText>
+                <DDText variant="bodySm" color="secondary" align="center" style={styles.successMsg}>
                   Your submission for {submitSuccess.completion_date} is now pending peer review.
-                </Text>
+                </DDText>
 
                 <View style={styles.successProofBox}>
-                  <Text style={styles.successProofNotice}>
-                    📸 Proof photos and videos are not uploaded to Supabase. Please send your proof directly to your assigned verifier via WhatsApp!
-                  </Text>
+                  <DDIcon name="info" size={16} color={DD_COLORS.info} weight="bold" />
+                  <DDText variant="caption" color="secondary" style={styles.successProofNotice}>
+                    Proof photos and videos are not uploaded to our servers. Send your proof directly to your assigned verifier via WhatsApp!
+                  </DDText>
                 </View>
 
-                <Pressable
+                <DDButton
+                  title="Share Proof on WhatsApp"
+                  variant="primary"
+                  iconLeft="share"
                   onPress={() => handleSendWhatsAppProof(submitSuccess)}
-                  style={styles.whatsAppShareBtn}>
-                  <Text style={styles.whatsAppShareBtnText}>📲 Share Proof on WhatsApp</Text>
-                </Pressable>
+                  fullWidth
+                  style={styles.modalSuccessBtn}
+                />
 
-                <Pressable
+                <DDButton
+                  title="Done"
+                  variant="secondary"
                   onPress={() => setSubmitModalVisible(false)}
-                  style={styles.modalDoneBtn}>
-                  <Text style={styles.modalDoneBtnText}>Done</Text>
-                </Pressable>
+                  fullWidth
+                />
               </View>
             ) : (
               /* Form State */
-              <ScrollView showsVerticalScrollIndicator={false}>
+              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.formScroll}>
                 {/* Date Selection (Daily challenge) */}
                 {isDaily ? (
                   <View style={styles.formGroup}>
-                    <Text style={styles.formLabel}>Completion Date</Text>
+                    <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                      Completion Date
+                    </DDText>
                     <View style={styles.dateSelectorRow}>
                       <Pressable
                         onPress={() => setSelectedDate(todayDate)}
@@ -1206,13 +1334,18 @@ export default function ChallengeDetailScreen() {
                           styles.dateOption,
                           selectedDate === todayDate && styles.dateOptionActive,
                         ]}>
-                        <Text
-                          style={[
-                            styles.dateOptionText,
-                            selectedDate === todayDate && styles.dateOptionTextActive,
-                          ]}>
-                          📅 Today ({todayDate})
-                        </Text>
+                        <DDIcon
+                          name="calendar"
+                          size={14}
+                          color={selectedDate === todayDate ? DD_COLORS.lime : DD_COLORS.textMuted}
+                          weight="bold"
+                        />
+                        <DDText
+                          variant="caption"
+                          bold
+                          color={selectedDate === todayDate ? 'lime' : 'secondary'}>
+                          Today ({todayDate})
+                        </DDText>
                       </Pressable>
 
                       <Pressable
@@ -1221,44 +1354,59 @@ export default function ChallengeDetailScreen() {
                           styles.dateOption,
                           selectedDate === yesterdayDate && styles.dateOptionActive,
                         ]}>
-                        <Text
-                          style={[
-                            styles.dateOptionText,
-                            selectedDate === yesterdayDate && styles.dateOptionTextActive,
-                          ]}>
-                          ⏮️ Yesterday ({yesterdayDate})
-                        </Text>
+                        <DDIcon
+                          name="clock"
+                          size={14}
+                          color={selectedDate === yesterdayDate ? DD_COLORS.lime : DD_COLORS.textMuted}
+                          weight="bold"
+                        />
+                        <DDText
+                          variant="caption"
+                          bold
+                          color={selectedDate === yesterdayDate ? 'lime' : 'secondary'}>
+                          Yesterday ({yesterdayDate})
+                        </DDText>
                       </Pressable>
                     </View>
-                    <Text style={styles.formHint}>
-                      Challenges allow submissions for today and yesterday in the challenge timezone ({challenge.timezone || 'UTC'}).
-                    </Text>
+                    <DDText variant="caption" color="muted" style={styles.formHint}>
+                      Submissions accepted for today and yesterday in timezone ({challenge.timezone || 'UTC'}).
+                    </DDText>
                   </View>
                 ) : (
                   <View style={styles.formGroup}>
-                    <Text style={styles.formLabel}>Dare Date</Text>
-                    <Text style={styles.staticDateText}>📅 Today: {todayDate}</Text>
+                    <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                      Dare Date
+                    </DDText>
+                    <View style={styles.staticDateBox}>
+                      <DDIcon name="calendar" size={14} color={DD_COLORS.lime} weight="bold" />
+                      <DDText variant="caption" color="lime" bold>
+                        Today: {todayDate}
+                      </DDText>
+                    </View>
                   </View>
                 )}
 
                 {/* Verifier Selection */}
                 <View style={styles.formGroup}>
-                  <Text style={styles.formLabel}>Assign Peer Verifier</Text>
+                  <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                    Assign Peer Verifier
+                  </DDText>
                   {eligibleVerifiers.length === 0 ? (
                     <View style={styles.noVerifiersBox}>
-                      <Text style={styles.noVerifiersText}>
-                        ⚠️ No eligible verifiers found. Peer verification requires at least one other participant or referee.
-                      </Text>
-                      <Pressable
+                      <DDIcon name="warning" size={18} color={DD_COLORS.warning} weight="bold" />
+                      <DDText variant="caption" color="secondary" style={styles.noVerifiersText}>
+                        No eligible verifiers found. Peer verification requires at least one other participant or referee.
+                      </DDText>
+                      <DDButton
+                        title="Invite a friend"
+                        variant="secondary"
+                        size="sm"
+                        iconLeft="user-plus"
                         onPress={() => {
                           setSubmitModalVisible(false);
                           handleShare();
                         }}
-                        style={styles.inviteFriendsAction}>
-                        <Text style={styles.inviteFriendsActionText}>
-                          📤 Invite a friend to this challenge
-                        </Text>
-                      </Pressable>
+                      />
                     </View>
                   ) : (
                     <View style={styles.verifiersList}>
@@ -1270,22 +1418,17 @@ export default function ChallengeDetailScreen() {
                             styles.verifierOption,
                             selectedVerifierId === v.user_id && styles.verifierOptionActive,
                           ]}>
-                          <View style={styles.verifierOptionLeft}>
-                            <Text style={styles.verifierOptionAvatar}>
-                              {v.is_creator ? '👑' : '👤'}
-                            </Text>
-                            <View>
-                              <Text
-                                style={[
-                                  styles.verifierOptionName,
-                                  selectedVerifierId === v.user_id && styles.verifierOptionNameActive,
-                                ]}>
-                                {v.display_name}
-                              </Text>
-                              <Text style={styles.verifierOptionRole}>
-                                {v.is_creator ? 'Challenge Referee / Creator' : 'Fellow Participant'}
-                              </Text>
-                            </View>
+                          <DDAvatar name={v.display_name} size="sm" />
+                          <View style={styles.verifierOptionMeta}>
+                            <DDText
+                              variant="label"
+                              bold
+                              color={selectedVerifierId === v.user_id ? 'lime' : 'primary'}>
+                              {v.display_name}
+                            </DDText>
+                            <DDText variant="caption" color="muted">
+                              {v.is_creator ? 'Challenge Creator / Referee' : 'Fellow Participant'}
+                            </DDText>
                           </View>
 
                           <View
@@ -1303,11 +1446,13 @@ export default function ChallengeDetailScreen() {
 
                 {/* Optional Submission Note */}
                 <View style={styles.formGroup}>
-                  <Text style={styles.formLabel}>Submission Note (Optional)</Text>
+                  <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                    Submission Note (Optional)
+                  </DDText>
                   <TextInput
                     style={styles.textInput}
-                    placeholder="e.g. 50 pushups completed, 3 sets. Felt great!"
-                    placeholderTextColor={DD.textMuted}
+                    placeholder="e.g. 50 pushups completed, felt great!"
+                    placeholderTextColor={DD_COLORS.textMuted}
                     value={submissionNote}
                     onChangeText={setSubmissionNote}
                     multiline
@@ -1318,37 +1463,34 @@ export default function ChallengeDetailScreen() {
 
                 {/* WhatsApp Info Notice */}
                 <View style={styles.infoNoticeBox}>
-                  <Text style={styles.infoNoticeTitle}>💬 How Peer Verification Works:</Text>
-                  <Text style={styles.infoNoticeBody}>
-                    {"1. Tap Submit below to log your completion on DareDrop.\n2. Next, tap 'Share Proof on WhatsApp' to send your photo/video directly to your verifier.\n3. Once your verifier approves it, your streak and progress will update!"}
-                  </Text>
+                  <DDIcon name="info" size={16} color={DD_COLORS.info} weight="bold" />
+                  <DDText variant="caption" color="secondary" style={styles.infoNoticeBody}>
+                    1. Tap Submit below to log your dare completion.{"\n"}
+                    2. Next, tap &lsquo;Share Proof on WhatsApp&rsquo; to send proof to your verifier.{"\n"}
+                    3. Once verified, your streak will instantly update!
+                  </DDText>
                 </View>
 
                 {/* Error Banner */}
                 {submitError && (
                   <View style={styles.errorBox}>
-                    <Text style={styles.errorText}>⚠️ {submitError}</Text>
+                    <DDIcon name="warning" size={16} color={DD_COLORS.danger} weight="bold" />
+                    <DDText variant="caption" color="danger" style={styles.errorText}>
+                      {submitError}
+                    </DDText>
                   </View>
                 )}
 
-                {/* Action Button */}
-                <Pressable
-                  onPress={handleSubmitCompletion}
+                {/* Submit Action */}
+                <DDButton
+                  title="Submit for Peer Verification"
+                  variant="primary"
+                  loading={isSubmitting}
                   disabled={isSubmitting || !selectedVerifierId || eligibleVerifiers.length === 0}
-                  style={({ pressed }) => [
-                    styles.modalSubmitActionBtn,
-                    (isSubmitting || !selectedVerifierId || eligibleVerifiers.length === 0) &&
-                      styles.btnDisabled,
-                    pressed && !isSubmitting && { opacity: 0.88 },
-                  ]}>
-                  {isSubmitting ? (
-                    <ActivityIndicator color={DD.bg} size="small" />
-                  ) : (
-                    <Text style={styles.modalSubmitActionBtnText}>
-                      Submit for Peer Verification
-                    </Text>
-                  )}
-                </Pressable>
+                  onPress={handleSubmitCompletion}
+                  fullWidth
+                  style={styles.modalSubmitActionBtn}
+                />
               </ScrollView>
             )}
           </View>
@@ -1364,20 +1506,23 @@ export default function ChallengeDetailScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeaderRow}>
-              <View>
-                <Text style={styles.modalTitle}>Reassign Verifier</Text>
-                <Text style={styles.modalSubtitle}>
+              <View style={styles.modalHeaderTexts}>
+                <DDText variant="h3" color="primary">
+                  Reassign Verifier
+                </DDText>
+                <DDText variant="caption" color="muted">
                   Choose a new peer to verify this submission
-                </Text>
+                </DDText>
               </View>
               <Pressable
                 onPress={() => setReassignModalVisible(false)}
+                hitSlop={8}
                 style={styles.modalCloseBtn}>
-                <Text style={styles.modalCloseBtnText}>✕</Text>
+                <DDIcon name="x" size={18} color={DD_COLORS.textMuted} weight="bold" />
               </Pressable>
             </View>
 
-            <View style={{ marginVertical: DD.s3 }}>
+            <View style={styles.modalListContainer}>
               {eligibleVerifiers
                 .filter((v) => v.user_id !== reassigningCompletion?.verifier_id)
                 .map((v) => (
@@ -1388,20 +1533,17 @@ export default function ChallengeDetailScreen() {
                       styles.verifierOption,
                       newVerifierId === v.user_id && styles.verifierOptionActive,
                     ]}>
-                    <Text style={styles.verifierOptionAvatar}>
-                      {v.is_creator ? '👑' : '👤'}
-                    </Text>
-                    <View style={{ flex: 1 }}>
-                      <Text
-                        style={[
-                          styles.verifierOptionName,
-                          newVerifierId === v.user_id && styles.verifierOptionNameActive,
-                        ]}>
+                    <DDAvatar name={v.display_name} size="sm" />
+                    <View style={styles.verifierOptionMeta}>
+                      <DDText
+                        variant="label"
+                        bold
+                        color={newVerifierId === v.user_id ? 'lime' : 'primary'}>
                         {v.display_name}
-                      </Text>
-                      <Text style={styles.verifierOptionRole}>
-                        {v.is_creator ? 'Referee' : 'Participant'}
-                      </Text>
+                      </DDText>
+                      <DDText variant="caption" color="muted">
+                        {v.is_creator ? 'Referee / Creator' : 'Participant'}
+                      </DDText>
                     </View>
                     <View
                       style={[
@@ -1416,36 +1558,34 @@ export default function ChallengeDetailScreen() {
               {eligibleVerifiers.filter(
                 (v) => v.user_id !== reassigningCompletion?.verifier_id,
               ).length === 0 && (
-                <Text style={styles.noVerifiersText}>
-                  No other eligible verifiers available. Invite more participants to the challenge to reassign.
-                </Text>
+                <DDText variant="bodySm" color="muted" align="center" style={styles.noVerifiersText}>
+                  No other eligible verifiers available. Invite more participants to reassign.
+                </DDText>
               )}
             </View>
 
             {reassignError && (
               <View style={styles.errorBox}>
-                <Text style={styles.errorText}>⚠️ {reassignError}</Text>
+                <DDIcon name="warning" size={16} color={DD_COLORS.danger} weight="bold" />
+                <DDText variant="caption" color="danger" style={styles.errorText}>
+                  {reassignError}
+                </DDText>
               </View>
             )}
 
-            <Pressable
-              onPress={handleReassignSubmit}
+            <DDButton
+              title="Confirm Reassignment"
+              variant="primary"
+              loading={isReassigning}
               disabled={isReassigning || !newVerifierId}
-              style={[
-                styles.modalSubmitActionBtn,
-                (!newVerifierId || isReassigning) && styles.btnDisabled,
-              ]}>
-              {isReassigning ? (
-                <ActivityIndicator color={DD.bg} size="small" />
-              ) : (
-                <Text style={styles.modalSubmitActionBtnText}>Confirm Reassignment</Text>
-              )}
-            </Pressable>
+              onPress={handleReassignSubmit}
+              fullWidth
+            />
           </View>
         </View>
       </Modal>
 
-      {/* Inline Reject Modal */}
+      {/* INLINE REJECT MODAL */}
       <Modal
         visible={inlineRejectModalVisible}
         transparent
@@ -1454,25 +1594,28 @@ export default function ChallengeDetailScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeaderRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>Reject Submission</Text>
-                <Text style={styles.modalSubtitle}>
-                  Provide feedback to the participant so they can submit valid proof.
-                </Text>
+              <View style={styles.modalHeaderTexts}>
+                <DDText variant="h3" color="primary">
+                  Reject Submission
+                </DDText>
+                <DDText variant="caption" color="muted">
+                  Provide feedback so the challenger can resubmit valid proof.
+                </DDText>
               </View>
               <Pressable
                 onPress={() => setInlineRejectModalVisible(false)}
                 disabled={isReviewing}
+                hitSlop={8}
                 style={styles.modalCloseBtn}>
-                <Text style={styles.modalCloseBtnText}>✕</Text>
+                <DDIcon name="x" size={18} color={DD_COLORS.textMuted} weight="bold" />
               </Pressable>
             </View>
 
-            <View style={{ marginVertical: DD.s4 }}>
+            <View style={styles.modalInputBox}>
               <TextInput
                 style={styles.textInput}
-                placeholder="e.g., Proof photo was missing or incomplete"
-                placeholderTextColor={DD.textMuted}
+                placeholder="e.g. Proof photo was missing or incomplete"
+                placeholderTextColor={DD_COLORS.textMuted}
                 value={inlineRejectionReason}
                 onChangeText={setInlineRejectionReason}
                 maxLength={MAX_REJECTION_REASON_LENGTH}
@@ -1482,155 +1625,115 @@ export default function ChallengeDetailScreen() {
               />
             </View>
 
-            <Pressable
-              onPress={handleConfirmInlineReject}
+            <DDButton
+              title="Confirm Reject"
+              variant="destructive"
+              loading={isReviewing}
               disabled={isReviewing}
-              style={[styles.modalConfirmRejectBtn, isReviewing && { opacity: 0.5 }]}>
-              {isReviewing ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={styles.modalConfirmRejectText}>Confirm Reject</Text>
-              )}
-            </Pressable>
+              onPress={handleConfirmInlineReject}
+              fullWidth
+            />
           </View>
         </View>
       </Modal>
 
-      {/* Invite Friends Modal */}
+      {/* INVITE FRIENDS MODAL */}
       <Modal
         visible={inviteModalVisible}
         transparent
         animationType="slide"
         onRequestClose={() => setInviteModalVisible(false)}>
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { maxHeight: '80%' }]}>
+          <View style={[styles.modalContent, { maxHeight: '82%' }]}>
             <View style={styles.modalHeaderRow}>
-              <View>
-                <Text style={styles.modalTitle}>Invite Friends</Text>
-                <Text style={styles.modalSubtitle}>
-                  Select friends to challenge them to &ldquo;{challenge?.title}&rdquo;
-                </Text>
+              <View style={styles.modalHeaderTexts}>
+                <DDText variant="h3" color="primary">
+                  Invite Friends
+                </DDText>
+                <DDText variant="caption" color="muted" numberOfLines={1}>
+                  Challenge your friends to &ldquo;{challenge.title}&rdquo;
+                </DDText>
               </View>
               <Pressable
                 onPress={() => setInviteModalVisible(false)}
                 hitSlop={8}
                 style={styles.modalCloseBtn}>
-                <Text style={styles.modalCloseBtnText}>✕</Text>
+                <DDIcon name="x" size={18} color={DD_COLORS.textMuted} weight="bold" />
               </Pressable>
             </View>
 
             {inviteFriendError && (
-              <View style={[styles.errorBox, { marginVertical: DD.s2 }]}>
-                <Text style={styles.errorText}>⚠️ {inviteFriendError}</Text>
+              <View style={styles.errorBox}>
+                <DDIcon name="warning" size={16} color={DD_COLORS.danger} weight="bold" />
+                <DDText variant="caption" color="danger" style={styles.errorText}>
+                  {inviteFriendError}
+                </DDText>
               </View>
             )}
 
             {loadingFriends ? (
-              <View style={{ paddingVertical: DD.s8, alignItems: 'center' }}>
-                <ActivityIndicator color={DD.lime} size="large" />
-                <Text style={{ color: DD.textMuted, marginTop: DD.s2, fontSize: 13 }}>
-                  Loading your friends...
-                </Text>
+              <View style={styles.friendsLoadingBox}>
+                <ActivityIndicator color={DD_COLORS.lime} size="large" />
+                <DDText variant="caption" color="secondary" style={{ marginTop: DD_SPACING.sm }}>
+                  Loading friends…
+                </DDText>
               </View>
             ) : myFriends.length === 0 ? (
-              <View style={{ paddingVertical: DD.s6, alignItems: 'center' }}>
-                <Text style={{ fontSize: 32, marginBottom: DD.s2 }}>🤝</Text>
-                <Text style={{ fontSize: 16, fontWeight: '800', color: DD.text, marginBottom: DD.s1 }}>
+              <View style={styles.friendsEmptyBox}>
+                <View style={styles.friendsEmptyIconCircle}>
+                  <DDIcon name="friends" size={32} color={DD_COLORS.textMuted} weight="bold" />
+                </View>
+                <DDText variant="h3" color="primary" align="center">
                   No friends added yet
-                </Text>
-                <Text style={{ fontSize: 13, color: DD.textSub, textAlign: 'center', marginBottom: DD.s4 }}>
+                </DDText>
+                <DDText variant="bodySm" color="secondary" align="center" style={styles.friendsEmptyDesc}>
                   Connect with friends using Friend Codes to invite them directly to dares!
-                </Text>
-                <Pressable
+                </DDText>
+                <DDButton
+                  title="Go to Friends & Social"
+                  variant="primary"
+                  iconRight="arrow-right"
                   onPress={() => {
                     setInviteModalVisible(false);
                     router.push('/friends');
                   }}
-                  style={{
-                    backgroundColor: DD.lime,
-                    paddingHorizontal: DD.s4,
-                    paddingVertical: DD.s2,
-                    borderRadius: DD.radiusPill,
-                  }}>
-                  <Text style={{ color: DD.bg, fontWeight: '800', fontSize: 13 }}>Go to Friends & Social →</Text>
-                </Pressable>
+                />
               </View>
             ) : (
-              <ScrollView style={{ marginTop: DD.s3 }} showsVerticalScrollIndicator={false}>
+              <ScrollView style={styles.friendsListScroll} showsVerticalScrollIndicator={false}>
                 {myFriends.map((f) => {
                   const isInvited = invitedFriendIds.has(f.friend_user_id);
                   const isAlreadyParticipant = eligibleVerifiers.some((v) => v.user_id === f.friend_user_id);
                   const isInviting = invitingFriendId === f.friend_user_id;
 
                   return (
-                    <View
-                      key={f.friendship_id}
-                      style={{
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        backgroundColor: DD.bgElement,
-                        padding: DD.s3,
-                        borderRadius: DD.radiusMd,
-                        marginBottom: DD.s2,
-                        borderWidth: 1,
-                        borderColor: DD.border,
-                      }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: DD.s3, flex: 1 }}>
-                        <Text style={{ fontSize: 24 }}>{f.avatar_emoji || '🦁'}</Text>
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ fontSize: 14, fontWeight: '800', color: DD.text }} numberOfLines={1}>
+                    <View key={f.friendship_id} style={styles.friendRow}>
+                      <View style={styles.friendRowLeft}>
+                        <DDAvatar name={f.display_name} size="sm" />
+                        <View style={styles.friendMeta}>
+                          <DDText variant="label" color="primary" bold numberOfLines={1}>
                             {f.display_name}
-                          </Text>
-                          <Text style={{ fontSize: 11, color: DD.textMuted }}>{f.friend_code}</Text>
+                          </DDText>
+                          <DDText variant="caption" color="muted">
+                            {f.friend_code}
+                          </DDText>
                         </View>
                       </View>
 
                       {isInvited ? (
-                        <View
-                          style={{
-                            paddingHorizontal: DD.s3,
-                            paddingVertical: DD.s1,
-                            borderRadius: DD.radiusPill,
-                            backgroundColor: DD.lime + '22',
-                            borderWidth: 1,
-                            borderColor: DD.lime,
-                          }}>
-                          <Text style={{ color: DD.lime, fontSize: 11, fontWeight: '800' }}>Invited ✓</Text>
-                        </View>
+                        <DDBadge label="Invited" variant="lime" size="sm" icon="check" />
                       ) : isAlreadyParticipant ? (
-                        <View
-                          style={{
-                            paddingHorizontal: DD.s3,
-                            paddingVertical: DD.s1,
-                            borderRadius: DD.radiusPill,
-                            backgroundColor: DD.bgCard,
-                            borderWidth: 1,
-                            borderColor: DD.border,
-                          }}>
-                          <Text style={{ color: DD.textMuted, fontSize: 11, fontWeight: '700' }}>Joined ✓</Text>
-                        </View>
+                        <DDBadge label="Joined" variant="neutral" size="sm" icon="check" />
                       ) : (
-                        <Pressable
-                          onPress={() => handleInviteFriend(f)}
+                        <DDButton
+                          title="Invite"
+                          variant="violet"
+                          size="sm"
+                          iconLeft="plus"
+                          loading={isInviting}
                           disabled={isInviting}
-                          style={({ pressed }) => [
-                            {
-                              backgroundColor: DD.purple,
-                              paddingHorizontal: DD.s3,
-                              paddingVertical: DD.s2,
-                              borderRadius: DD.radiusPill,
-                              minWidth: 70,
-                              alignItems: 'center',
-                            },
-                            pressed && { opacity: 0.8 },
-                          ]}>
-                          {isInviting ? (
-                            <ActivityIndicator size="small" color="#fff" />
-                          ) : (
-                            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '800' }}>Invite ⚡</Text>
-                          )}
-                        </Pressable>
+                          onPress={() => handleInviteFriend(f)}
+                        />
                       )}
                     </View>
                   );
@@ -1644,1197 +1747,768 @@ export default function ChallengeDetailScreen() {
   );
 }
 
-function DetailStat({
-  icon,
-  value,
-  label,
-  color,
-}: {
-  icon: string;
-  value: string;
-  label: string;
-  color: string;
-}) {
-  return (
-    <View style={detailStatStyles.box}>
-      <Text style={detailStatStyles.icon}>{icon}</Text>
-      <Text style={[detailStatStyles.value, { color }]}>{value}</Text>
-      <Text style={detailStatStyles.label}>{label}</Text>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: DD.bg,
+    backgroundColor: DD_COLORS.bg,
   },
   centerContainer: {
     justifyContent: 'center',
     alignItems: 'center',
-    gap: DD.s3,
+    gap: DD_SPACING.sm,
   },
   loadingText: {
-    color: DD.textSub,
-    fontSize: 15,
-    fontWeight: '600',
+    marginTop: DD_SPACING.xs,
   },
   notFound: {
     justifyContent: 'center',
     alignItems: 'center',
-    gap: DD.s4,
-    paddingHorizontal: DD.s5,
+    paddingHorizontal: DD_SPACING.xl,
+    gap: DD_SPACING.md,
   },
-  notFoundIcon: {
-    fontSize: 48,
-  },
-  notFoundText: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: DD.text,
+  notFoundIconCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: DD_COLORS.bgElement,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   notFoundSubtext: {
-    fontSize: 14,
-    color: DD.textSub,
-    textAlign: 'center',
     maxWidth: 280,
+    lineHeight: 18,
+  },
+  backBtn: {
+    marginTop: DD_SPACING.sm,
   },
   toastContainer: {
     position: 'absolute',
     alignSelf: 'center',
     zIndex: 999,
-    backgroundColor: DD.bgCard,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: DD_COLORS.bgCard,
     borderWidth: 1.5,
-    borderColor: DD.lime,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s4,
-    borderRadius: DD.radiusPill,
-    shadowColor: DD.lime,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 10,
-    elevation: 8,
+    borderColor: DD_COLORS.lime,
+    paddingVertical: DD_SPACING.xs,
+    paddingHorizontal: DD_SPACING.md,
+    borderRadius: DD_RADII.pill,
+    ...DD_COLORS.limeGlow ? { elevation: 6 } : {},
   },
   toastText: {
-    color: DD.lime,
-    fontSize: 13,
-    fontWeight: '800',
+    letterSpacing: 0.2,
   },
   navBar: {
-    paddingHorizontal: DD.s5,
-    paddingBottom: DD.s3,
+    paddingHorizontal: DD_SPACING.lg,
+    paddingBottom: DD_SPACING.sm,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: DD.bg,
+    backgroundColor: DD_COLORS.bg,
     borderBottomWidth: 1,
-    borderBottomColor: DD.border,
+    borderBottomColor: DD_COLORS.borderSubtle,
     zIndex: 10,
   },
   navRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s2,
+    gap: DD_SPACING.sm,
   },
-  backPill: {
-    backgroundColor: DD.bgCard,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
+  navIconButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: DD_COLORS.bgElement,
     borderWidth: 1,
-    borderColor: DD.border,
-  },
-  backPillText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: DD.text,
-  },
-  shareNavBtn: {
-    backgroundColor: DD.bgCard,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
-    borderWidth: 1,
-    borderColor: DD.border,
-  },
-  shareNavBtnText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: DD.text,
-  },
-  joinedPill: {
-    backgroundColor: DD.lime + '22',
-    borderWidth: 1,
-    borderColor: DD.lime,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
-  },
-  joinedPillText: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: DD.lime,
+    borderColor: DD_COLORS.borderSubtle,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   scroll: {
     flex: 1,
   },
   content: {
-    paddingTop: DD.s4,
-    paddingHorizontal: DD.s5,
+    paddingTop: DD_SPACING.md,
+    paddingHorizontal: DD_SPACING.lg,
   },
-  hero: {
-    paddingBottom: DD.s5,
-    borderBottomWidth: 2,
-    marginBottom: DD.s5,
+
+  /* Hero Section */
+  heroCard: {
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.card,
+    borderWidth: 1,
+    overflow: 'hidden',
+    marginBottom: DD_SPACING.lg,
   },
-  categoryTag: {
-    alignSelf: 'flex-start',
-    paddingVertical: DD.s1,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
-    marginBottom: DD.s3,
+  heroAccentBar: {
+    height: 4,
+    width: '100%',
   },
-  categoryTagText: {
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 0.5,
+  heroBody: {
+    padding: DD_SPACING.lg,
+    gap: DD_SPACING.sm,
   },
-  title: {
-    fontSize: 26,
-    fontWeight: '900',
-    color: DD.text,
-    letterSpacing: -0.5,
-    lineHeight: 32,
-    marginBottom: DD.s2,
+  heroBadgesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    flexWrap: 'wrap',
   },
-  creatorText: {
-    fontSize: 13,
-    color: DD.textSub,
-    fontWeight: '500',
+  categoryPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 3,
+    borderRadius: DD_RADII.pill,
   },
+  categoryPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  typePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 3,
+    borderRadius: DD_RADII.pill,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+  },
+  typePillText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  heroTitle: {
+    marginTop: 2,
+    lineHeight: 34,
+  },
+  creatorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
+    paddingTop: DD_SPACING.xs,
+  },
+  creatorMeta: {
+    justifyContent: 'center',
+  },
+
+  /* Stats Grid */
   statsGrid: {
     flexDirection: 'row',
-    gap: DD.s2,
-    marginBottom: DD.s6,
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.lg,
   },
-  section: {
-    marginBottom: DD.s6,
+  statBox: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: DD_SPACING.md,
+    paddingHorizontal: DD_SPACING.xs,
   },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: DD.text,
-    letterSpacing: -0.3,
+  statIconBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
   },
+  statValue: {
+    fontSize: 18,
+    lineHeight: 22,
+    fontWeight: '900',
+  },
+  statLabel: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+
+  /* Section Cards */
+  sectionCard: {
+    marginBottom: DD_SPACING.lg,
+  },
+  sectionHeading: {
+    marginBottom: DD_SPACING.sm,
+  },
+
+  /* Progress Section */
   progressHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: DD.s2,
+    alignItems: 'flex-start',
+    marginBottom: DD_SPACING.sm,
   },
-  progressPct: {
-    fontSize: 16,
+  progressHeaderLeft: {
+    flex: 1,
+    gap: 4,
+  },
+  streakBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(191, 253, 64, 0.12)',
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 2,
+    borderRadius: DD_RADII.pill,
+  },
+  streakText: {
+    fontSize: 10,
+    letterSpacing: 0.5,
+  },
+  progressPctText: {
+    fontSize: 22,
+    lineHeight: 26,
     fontWeight: '900',
   },
   progressTrack: {
-    height: 10,
-    backgroundColor: DD.bgCard,
-    borderRadius: 5,
+    height: 8,
+    backgroundColor: DD_COLORS.bgElement,
+    borderRadius: 4,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: DD.border,
+    borderColor: DD_COLORS.borderSubtle,
+    marginBottom: DD_SPACING.sm,
   },
   progressFill: {
     height: '100%',
-    borderRadius: 5,
+    borderRadius: 4,
   },
   progressSubrow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: DD.s2,
   },
-  progressLabel: {
-    fontSize: 12,
-    color: DD.textSub,
-    fontWeight: '600',
+  completedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 2,
+    borderRadius: DD_RADII.pill,
   },
-  streakBadge: {
-    marginTop: 2,
-    alignSelf: 'flex-start',
+  disclaimerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: DD_SPACING.sm,
+    paddingTop: DD_SPACING.xs,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.04)',
   },
-  streakText: {
-    fontSize: 12,
-    color: DD.lime,
-    fontWeight: '800',
+  disclaimerText: {
+    flex: 1,
+    lineHeight: 14,
   },
-  completedBadgeText: {
-    fontSize: 12,
-    color: DD.lime,
-    fontWeight: '800',
-  },
-  progressDisclaimer: {
-    fontSize: 11,
-    color: DD.textMuted,
-    fontStyle: 'italic',
-    marginTop: 4,
-  },
+
+  /* Peer Verification & Submission */
   submissionSectionCard: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusCard,
-    padding: DD.s5,
+    marginBottom: DD_SPACING.lg,
     borderWidth: 1.5,
-    borderColor: DD.lime + '55',
-    marginBottom: DD.s6,
-    shadowColor: DD.lime,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
-    elevation: 4,
+    borderColor: 'rgba(191, 253, 64, 0.35)',
   },
   cardHeaderRow: {
+    marginBottom: DD_SPACING.sm,
+  },
+  verificationBadgesRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: DD.s2,
-  },
-  badgeRow: {
-    flexDirection: 'row',
-    gap: DD.s2,
-    marginBottom: DD.s2,
-  },
-  verificationBadge: {
-    fontSize: 10,
-    fontWeight: '900',
-    color: DD.lime,
-    backgroundColor: DD.lime + '18',
-    paddingVertical: 2,
-    paddingHorizontal: 8,
-    borderRadius: DD.radiusPill,
-    letterSpacing: 0.5,
-  },
-  whatsappBadge: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: DD.success,
-    backgroundColor: DD.success + '18',
-    paddingVertical: 2,
-    paddingHorizontal: 8,
-    borderRadius: DD.radiusPill,
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.xs,
   },
   cardMainTitle: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: DD.text,
-    letterSpacing: -0.3,
-  },
-  cardDescription: {
-    fontSize: 13,
-    color: DD.textSub,
-    lineHeight: 18,
-    marginBottom: DD.s4,
-  },
-  statusBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: DD.s3,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    marginBottom: DD.s4,
-    borderWidth: 1,
-  },
-  statusBannerApproved: {
-    backgroundColor: DD.success + '15',
-    borderColor: DD.success + '44',
-  },
-  statusBannerPending: {
-    backgroundColor: '#FFB80015',
-    borderColor: '#FFB80044',
-  },
-  statusBannerRejected: {
-    backgroundColor: DD.danger + '15',
-    borderColor: DD.danger + '44',
-  },
-  statusBannerIcon: {
-    fontSize: 20,
-  },
-  statusBannerTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  statusBannerSub: {
-    fontSize: 12,
-    color: DD.textSub,
     marginTop: 2,
   },
-  remindBtn: {
-    marginTop: DD.s2,
-    alignSelf: 'flex-start',
-    backgroundColor: DD.success,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: DD.radiusPill,
+  cardDescription: {
+    lineHeight: 18,
+    marginBottom: DD_SPACING.md,
   },
-  remindBtnText: {
-    color: DD.bg,
-    fontSize: 11,
-    fontWeight: '800',
+  statusCallout: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.md,
+  },
+  statusCalloutApproved: {
+    backgroundColor: 'rgba(0, 230, 118, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 230, 118, 0.25)',
+  },
+  statusCalloutPending: {
+    backgroundColor: 'rgba(255, 184, 0, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 184, 0, 0.25)',
+  },
+  statusCalloutRejected: {
+    backgroundColor: 'rgba(255, 59, 86, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 59, 86, 0.25)',
+  },
+  calloutTexts: {
+    flex: 1,
+    gap: 4,
+  },
+  calloutActionBtn: {
+    marginTop: DD_SPACING.xs,
+    alignSelf: 'flex-start',
   },
   submitActionBox: {
-    gap: DD.s2,
+    gap: DD_SPACING.sm,
   },
-  primarySubmitBtn: {
-    backgroundColor: DD.lime,
-    paddingVertical: DD.s4,
-    borderRadius: DD.radiusPill,
+  yesterdaySubmitBtn: {
+    alignSelf: 'center',
+  },
+
+  /* Reviewable Submissions Section */
+  reviewSectionHeader: {
+    marginBottom: DD_SPACING.xs,
+  },
+  reviewTitleGroup: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: DD.lime,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 5,
+    gap: DD_SPACING.sm,
   },
-  primarySubmitBtnText: {
-    color: DD.bg,
-    fontSize: 15,
-    fontWeight: '900',
-    letterSpacing: 0.3,
+  reviewSubtext: {
+    lineHeight: 18,
+    marginBottom: DD_SPACING.md,
   },
-  yesterdayBtn: {
-    alignItems: 'center',
-    paddingVertical: DD.s2,
+  reviewList: {
+    gap: DD_SPACING.md,
   },
-  yesterdayBtnText: {
-    color: DD.textSub,
-    fontSize: 12,
-    fontWeight: '600',
-    textDecorationLine: 'underline',
-  },
-  historyCard: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusLg,
-    padding: DD.s4,
+  reviewItemCard: {
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
     borderWidth: 1,
-    borderColor: DD.border,
-    marginBottom: DD.s6,
+    borderColor: DD_COLORS.borderSubtle,
+    gap: DD_SPACING.sm,
   },
+  reviewItemTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+  },
+  reviewItemMeta: {
+    flex: 1,
+  },
+  reviewNoteBox: {
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    paddingHorizontal: DD_SPACING.md,
+    paddingVertical: DD_SPACING.xs,
+    borderRadius: DD_RADII.xs,
+    borderLeftWidth: 2,
+    borderLeftColor: DD_COLORS.coral,
+  },
+  reviewNoteText: {
+    fontStyle: 'italic',
+  },
+  reviewButtonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
+  },
+  reviewBtnFlex: {
+    flex: 1,
+  },
+
+  /* History Section */
   historyHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: DD.s3,
-    paddingBottom: DD.s2,
-    borderBottomWidth: 1,
-    borderBottomColor: DD.border,
-  },
-  historyTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  historyCount: {
-    fontSize: 12,
-    color: DD.textMuted,
-    fontWeight: '600',
+    marginBottom: DD_SPACING.md,
   },
   historyList: {
-    gap: DD.s3,
+    gap: DD_SPACING.sm,
   },
   historyItem: {
-    backgroundColor: DD.bgElement,
-    borderRadius: DD.radiusMd,
-    padding: DD.s3,
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
     borderWidth: 1,
-    borderColor: DD.border,
+    borderColor: DD_COLORS.borderSubtle,
+    gap: DD_SPACING.xs,
   },
   historyItemTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-  },
-  historyDate: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  historyVerifier: {
-    fontSize: 11,
-    color: DD.textSub,
-    marginTop: 2,
-  },
-  badgePill: {
-    paddingVertical: 3,
-    paddingHorizontal: 8,
-    borderRadius: DD.radiusPill,
-    borderWidth: 1,
-  },
-  badgeApproved: {
-    backgroundColor: DD.success + '22',
-    borderColor: DD.success,
-  },
-  badgeApprovedText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: DD.success,
-  },
-  badgePending: {
-    backgroundColor: '#FFB80022',
-    borderColor: '#FFB800',
-  },
-  badgePendingText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#FFB800',
-  },
-  badgeRejected: {
-    backgroundColor: DD.danger + '22',
-    borderColor: DD.danger,
-  },
-  badgeRejectedText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: DD.danger,
+    alignItems: 'center',
   },
   historyNote: {
-    fontSize: 12,
-    color: DD.textSub,
     fontStyle: 'italic',
-    marginTop: DD.s2,
+    marginTop: 2,
   },
   rejectionReasonText: {
-    fontSize: 12,
-    color: DD.danger,
-    marginTop: 4,
-    fontWeight: '600',
+    marginTop: 2,
   },
   historyActionsRow: {
     flexDirection: 'row',
-    gap: DD.s2,
-    marginTop: DD.s3,
-    paddingTop: DD.s2,
-    borderTopWidth: 1,
-    borderTopColor: DD.border,
+    flexWrap: 'wrap',
+    gap: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
   },
-  historyActionBtn: {
-    backgroundColor: DD.lime,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: DD.radiusPill,
-  },
-  historyActionBtnText: {
-    color: DD.bg,
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  historyActionBtnSecondary: {
-    backgroundColor: DD.bgCard,
-    borderWidth: 1,
-    borderColor: DD.border,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: DD.radiusPill,
-  },
-  historyActionBtnSecondaryText: {
-    color: DD.textSub,
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  inviteCard: {
-    backgroundColor: DD.bgCard,
-    borderWidth: 1.5,
-    borderColor: DD.border,
-    borderRadius: DD.radiusLg,
-    padding: DD.s4,
-    marginBottom: DD.s6,
-  },
+
+  /* Invite Section */
   inviteHeader: {
+    marginBottom: DD_SPACING.md,
+  },
+  inviteHeaderLeft: {
+    gap: 4,
+  },
+  inviteTitleRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: DD.s3,
-  },
-  inviteTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  inviteSubtitle: {
-    fontSize: 12,
-    color: DD.textSub,
-    marginTop: 2,
-    maxWidth: 240,
-  },
-  inviteBadge: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: DD.lime,
-    backgroundColor: DD.lime + '18',
-    paddingVertical: 3,
-    paddingHorizontal: 8,
-    borderRadius: DD.radiusPill,
-    borderWidth: 1,
-    borderColor: DD.lime + '33',
+    alignItems: 'center',
+    gap: 6,
   },
   inviteButtonsRow: {
     flexDirection: 'row',
-    gap: DD.s2,
-    marginTop: DD.s2,
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.sm,
   },
-  inviteBtn: {
+  inviteBtnFlex: {
     flex: 1,
-    paddingVertical: DD.s3,
-    borderRadius: DD.radiusPill,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  inviteBtnCopy: {
-    backgroundColor: DD.bgElement,
-    borderWidth: 1,
-    borderColor: DD.border,
-  },
-  inviteBtnCopyText: {
-    color: DD.text,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  inviteBtnShare: {
-    backgroundColor: DD.lime,
-  },
-  inviteBtnShareText: {
-    color: DD.bg,
-    fontSize: 13,
-    fontWeight: '800',
   },
   linkInfoToggle: {
-    marginTop: DD.s3,
-    alignItems: 'center',
-  },
-  linkInfoToggleText: {
-    fontSize: 11,
-    color: DD.textMuted,
-    fontWeight: '600',
+    paddingVertical: DD_SPACING.xs,
+    alignSelf: 'flex-start',
   },
   linkDetailsBox: {
-    marginTop: DD.s3,
-    paddingTop: DD.s3,
-    borderTopWidth: 1,
-    borderTopColor: DD.border,
-    gap: DD.s2,
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    gap: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
   },
   urlItem: {
     gap: 2,
   },
-  urlLabel: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: DD.textMuted,
-    textTransform: 'uppercase',
-  },
-  urlValue: {
-    fontSize: 11,
-    color: DD.lime,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    backgroundColor: DD.bgElement,
-    padding: DD.s2,
-    borderRadius: DD.radiusSm,
-  },
-  urlNote: {
-    fontSize: 11,
-    color: DD.textSub,
-    fontStyle: 'italic',
-    marginTop: 2,
-  },
-  descriptionCard: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusLg,
-    padding: DD.s4,
-    borderWidth: 1,
-    borderColor: DD.border,
-  },
-  description: {
-    fontSize: 14,
-    color: DD.textSub,
+
+  /* Description & Rules */
+  descriptionText: {
     lineHeight: 22,
   },
   rulesList: {
-    gap: DD.s2,
+    gap: DD_SPACING.sm,
   },
   ruleItem: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: DD.s3,
-    backgroundColor: DD.bgCard,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    borderWidth: 1,
-    borderColor: DD.border,
+    alignItems: 'flex-start',
+    gap: DD_SPACING.md,
   },
-  ruleNumber: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
+  ruleNumberCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
     justifyContent: 'center',
-    alignItems: 'center',
-  },
-  ruleNumberText: {
-    fontSize: 12,
-    fontWeight: '800',
+    marginTop: 1,
   },
   ruleText: {
     flex: 1,
-    fontSize: 13,
-    color: DD.text,
-    fontWeight: '500',
+    lineHeight: 19,
   },
+
+  /* Bottom CTA Bar */
   ctaContainer: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: DD.bg + 'F0',
-    paddingHorizontal: DD.s5,
-    paddingTop: DD.s3,
+    backgroundColor: DD_COLORS.bgCard,
     borderTopWidth: 1,
-    borderTopColor: DD.border,
+    borderTopColor: DD_COLORS.borderSubtle,
+    paddingHorizontal: DD_SPACING.lg,
+    paddingTop: DD_SPACING.sm,
+    ...Platform.select({
+      android: { elevation: 12 },
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: -4 },
+        shadowOpacity: 0.35,
+        shadowRadius: 10,
+      },
+      default: {},
+    }),
   },
   joinedCtaRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s3,
+    gap: DD_SPACING.md,
   },
-  bottomSubmitBtn: {
-    flex: 2,
-    backgroundColor: DD.lime,
-    borderRadius: DD.radiusPill,
-    paddingVertical: DD.s4,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: DD.lime,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 6,
-  },
-  bottomSubmitBtnText: {
-    color: DD.bg,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  leaveTextBtn: {
+  bottomMainBtn: {
     flex: 1,
-    backgroundColor: DD.bgCard,
-    borderWidth: 1,
-    borderColor: DD.border,
-    paddingVertical: DD.s4,
-    borderRadius: DD.radiusPill,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
-  leaveText: {
-    color: DD.textSub,
-    fontSize: 13,
-    fontWeight: '700',
+  leaveDareBtn: {
+    paddingHorizontal: DD_SPACING.sm,
   },
-  ctaButton: {
-    borderRadius: DD.radiusPill,
-    paddingVertical: DD.s4,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 6,
-  },
-  ctaButtonJoin: {
-    shadowColor: DD.lime,
-  },
-  ctaText: {
-    fontSize: 16,
-    fontWeight: '900',
-    letterSpacing: 0.3,
-  },
-  ctaTextJoin: {
-    color: DD.bg,
-  },
-  backBtn: {
-    backgroundColor: DD.bgCard,
-    borderWidth: 1,
-    borderColor: DD.border,
-    paddingVertical: DD.s3,
-    paddingHorizontal: DD.s5,
-    borderRadius: DD.radiusPill,
-  },
-  backBtnText: {
-    color: DD.text,
-    fontSize: 14,
-    fontWeight: '700',
-  },
+
+  /* Modals */
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.75)',
     justifyContent: 'flex-end',
   },
   modalContent: {
-    backgroundColor: DD.bgCard,
-    borderTopLeftRadius: DD.radiusCard,
-    borderTopRightRadius: DD.radiusCard,
-    paddingHorizontal: DD.s5,
-    paddingTop: DD.s5,
-    paddingBottom: DD.s8,
-    maxHeight: '90%',
+    backgroundColor: DD_COLORS.bgCard,
+    borderTopLeftRadius: DD_RADII.card,
+    borderTopRightRadius: DD_RADII.card,
     borderWidth: 1,
-    borderColor: DD.border,
+    borderColor: DD_COLORS.borderProminent,
+    padding: DD_SPACING.xl,
+    maxHeight: '90%',
   },
   modalHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: DD.s4,
-    paddingBottom: DD.s3,
-    borderBottomWidth: 1,
-    borderBottomColor: DD.border,
+    alignItems: 'flex-start',
+    marginBottom: DD_SPACING.md,
   },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: DD.text,
-  },
-  modalSubtitle: {
-    fontSize: 12,
-    color: DD.textSub,
-    marginTop: 2,
+  modalHeaderTexts: {
+    flex: 1,
+    paddingRight: DD_SPACING.sm,
+    gap: 2,
   },
   modalCloseBtn: {
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: DD.bgElement,
+    backgroundColor: DD_COLORS.bgElement,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  modalCloseBtnText: {
-    color: DD.textSub,
-    fontSize: 14,
-    fontWeight: '700',
+  formScroll: {
+    gap: DD_SPACING.md,
+    paddingBottom: DD_SPACING.lg,
   },
   formGroup: {
-    marginBottom: DD.s4,
+    gap: DD_SPACING.xs,
   },
   formLabel: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: DD.text,
-    marginBottom: DD.s2,
-    letterSpacing: 0.2,
-  },
-  formHint: {
-    fontSize: 11,
-    color: DD.textMuted,
-    marginTop: 4,
+    marginBottom: 2,
   },
   dateSelectorRow: {
     flexDirection: 'row',
-    gap: DD.s2,
+    gap: DD_SPACING.sm,
   },
   dateOption: {
     flex: 1,
-    backgroundColor: DD.bgElement,
-    borderWidth: 1.5,
-    borderColor: DD.border,
-    paddingVertical: DD.s3,
-    paddingHorizontal: DD.s2,
-    borderRadius: DD.radiusMd,
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 6,
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    minHeight: 48,
   },
   dateOptionActive: {
-    borderColor: DD.lime,
-    backgroundColor: DD.lime + '15',
+    borderColor: DD_COLORS.lime,
+    backgroundColor: 'rgba(191, 253, 64, 0.08)',
   },
-  dateOptionText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: DD.textSub,
+  formHint: {
+    marginTop: 2,
+    lineHeight: 14,
   },
-  dateOptionTextActive: {
-    color: DD.lime,
-    fontWeight: '800',
+  staticDateBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
   },
-  staticDateText: {
-    color: DD.lime,
-    fontSize: 13,
-    fontWeight: '800',
-    backgroundColor: DD.bgElement,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
+  noVerifiersBox: {
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    gap: DD_SPACING.sm,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 184, 0, 0.25)',
+  },
+  noVerifiersText: {
+    lineHeight: 18,
   },
   verifiersList: {
-    gap: DD.s2,
+    gap: DD_SPACING.xs,
   },
   verifierOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: DD.bgElement,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    borderWidth: 1.5,
-    borderColor: DD.border,
+    gap: DD_SPACING.sm,
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    minHeight: 52,
   },
   verifierOptionActive: {
-    borderColor: DD.lime,
-    backgroundColor: DD.lime + '12',
+    borderColor: DD_COLORS.lime,
+    backgroundColor: 'rgba(191, 253, 64, 0.06)',
   },
-  verifierOptionLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: DD.s3,
-  },
-  verifierOptionAvatar: {
-    fontSize: 20,
-  },
-  verifierOptionName: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  verifierOptionNameActive: {
-    color: DD.lime,
-  },
-  verifierOptionRole: {
-    fontSize: 11,
-    color: DD.textSub,
-    marginTop: 2,
+  verifierOptionMeta: {
+    flex: 1,
   },
   radioCircle: {
     width: 20,
     height: 20,
     borderRadius: 10,
     borderWidth: 2,
-    borderColor: DD.border,
+    borderColor: DD_COLORS.borderProminent,
     alignItems: 'center',
     justifyContent: 'center',
   },
   radioCircleActive: {
-    borderColor: DD.lime,
+    borderColor: DD_COLORS.lime,
   },
   radioDot: {
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: DD.lime,
-  },
-  noVerifiersBox: {
-    backgroundColor: DD.bgElement,
-    padding: DD.s4,
-    borderRadius: DD.radiusMd,
-    borderWidth: 1,
-    borderColor: DD.border,
-    gap: DD.s3,
-  },
-  noVerifiersText: {
-    fontSize: 12,
-    color: DD.textSub,
-    lineHeight: 18,
-  },
-  inviteFriendsAction: {
-    backgroundColor: DD.lime + '22',
-    borderWidth: 1,
-    borderColor: DD.lime,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
-    alignSelf: 'flex-start',
-  },
-  inviteFriendsActionText: {
-    color: DD.lime,
-    fontSize: 12,
-    fontWeight: '800',
+    backgroundColor: DD_COLORS.lime,
   },
   textInput: {
-    backgroundColor: DD.bgElement,
-    borderRadius: DD.radiusMd,
+    backgroundColor: DD_COLORS.bgElement,
+    borderRadius: DD_RADII.md,
     borderWidth: 1,
-    borderColor: DD.border,
-    padding: DD.s3,
-    color: DD.text,
-    fontSize: 13,
-    minHeight: 60,
+    borderColor: DD_COLORS.borderSubtle,
+    padding: DD_SPACING.md,
+    color: DD_COLORS.text,
+    fontSize: 14,
+    minHeight: 80,
     textAlignVertical: 'top',
   },
   infoNoticeBox: {
-    backgroundColor: DD.bgElevated,
-    borderRadius: DD.radiusMd,
-    padding: DD.s3,
-    marginBottom: DD.s4,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: DD_SPACING.sm,
+    backgroundColor: 'rgba(0, 212, 255, 0.06)',
     borderWidth: 1,
-    borderColor: DD.border,
-  },
-  infoNoticeTitle: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: DD.lime,
-    marginBottom: 4,
+    borderColor: 'rgba(0, 212, 255, 0.2)',
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
   },
   infoNoticeBody: {
-    fontSize: 11,
-    color: DD.textSub,
-    lineHeight: 16,
-  },
-  errorBox: {
-    backgroundColor: DD.danger + '22',
-    borderWidth: 1,
-    borderColor: DD.danger,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    marginBottom: DD.s4,
-  },
-  errorText: {
-    fontSize: 12,
-    color: DD.danger,
-    fontWeight: '600',
-  },
-  modalSubmitActionBtn: {
-    backgroundColor: DD.lime,
-    paddingVertical: DD.s4,
-    borderRadius: DD.radiusPill,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: DD.s2,
-  },
-  modalSubmitActionBtnText: {
-    color: DD.bg,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  btnDisabled: {
-    opacity: 0.5,
-  },
-  successStateBox: {
-    alignItems: 'center',
-    paddingVertical: DD.s4,
-    gap: DD.s3,
-  },
-  successIcon: {
-    fontSize: 48,
-  },
-  successTitle: {
-    fontSize: 20,
-    fontWeight: '900',
-    color: DD.text,
-  },
-  successMsg: {
-    fontSize: 13,
-    color: DD.textSub,
-    textAlign: 'center',
-    maxWidth: 280,
-  },
-  successProofBox: {
-    backgroundColor: DD.bgElement,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    borderWidth: 1,
-    borderColor: DD.border,
-    marginVertical: DD.s2,
-  },
-  successProofNotice: {
-    fontSize: 12,
-    color: DD.lime,
-    textAlign: 'center',
-    fontWeight: '600',
+    flex: 1,
     lineHeight: 18,
   },
-  whatsAppShareBtn: {
-    backgroundColor: DD.success,
-    paddingVertical: DD.s4,
-    paddingHorizontal: DD.s6,
-    borderRadius: DD.radiusPill,
-    width: '100%',
-    alignItems: 'center',
-    shadowColor: DD.success,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  whatsAppShareBtnText: {
-    color: DD.bg,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  modalDoneBtn: {
-    paddingVertical: DD.s3,
-  },
-  modalDoneBtnText: {
-    color: DD.textSub,
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  reviewSectionCard: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusCard,
-    padding: DD.s5,
-    borderWidth: 1,
-    borderColor: '#FFB80066',
-    gap: DD.s3,
-  },
-  reviewSectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  reviewTitleRow: {
+  errorBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s2,
-  },
-  reviewIcon: {
-    fontSize: 20,
-  },
-  reviewMainTitle: {
-    fontSize: 17,
-    fontWeight: '900',
-    color: DD.text,
-  },
-  reviewBadge: {
-    backgroundColor: '#FFB80022',
-    paddingHorizontal: DD.s3,
-    paddingVertical: DD.s1,
-    borderRadius: DD.radiusPill,
+    gap: 6,
+    backgroundColor: 'rgba(255, 59, 86, 0.1)',
     borderWidth: 1,
-    borderColor: '#FFB800',
+    borderColor: 'rgba(255, 59, 86, 0.3)',
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
   },
-  reviewBadgeText: {
-    color: '#FFB800',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  reviewSubtext: {
-    fontSize: 12,
-    color: DD.textSub,
-    lineHeight: 17,
-  },
-  reviewList: {
-    gap: DD.s3,
-  },
-  reviewItemCard: {
-    backgroundColor: DD.bgElement,
-    borderRadius: DD.radiusMd,
-    padding: DD.s4,
-    borderWidth: 1,
-    borderColor: DD.border,
-    gap: DD.s2,
-  },
-  reviewItemTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-  },
-  reviewSubmitterName: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  reviewDateText: {
-    fontSize: 11,
-    color: DD.textMuted,
-    marginTop: 2,
-  },
-  reviewNoteBox: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusSm,
-    padding: DD.s3,
-    borderWidth: 1,
-    borderColor: DD.border,
-  },
-  reviewNoteText: {
-    fontSize: 12,
-    color: DD.text,
-    fontStyle: 'italic',
-  },
-  reviewButtonsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: DD.s2,
-    marginTop: DD.s1,
-  },
-  quickApproveBtn: {
+  errorText: {
     flex: 1,
-    backgroundColor: DD.lime,
-    paddingVertical: DD.s2 + 2,
-    borderRadius: DD.radiusPill,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
-  quickApproveText: {
-    color: DD.bg,
-    fontWeight: '800',
-    fontSize: 13,
+  modalSubmitActionBtn: {
+    marginTop: DD_SPACING.xs,
   },
-  quickRejectBtn: {
-    flex: 1,
-    backgroundColor: DD.bgCard,
-    paddingVertical: DD.s2 + 2,
-    borderRadius: DD.radiusPill,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: DD.danger + '88',
+  modalListContainer: {
+    gap: DD_SPACING.xs,
+    marginVertical: DD_SPACING.md,
   },
-  quickRejectText: {
-    color: DD.danger,
-    fontWeight: '800',
-    fontSize: 13,
+  modalInputBox: {
+    marginVertical: DD_SPACING.md,
   },
-  detailsReviewBtn: {
-    paddingHorizontal: DD.s3,
-    paddingVertical: DD.s2,
-  },
-  detailsReviewBtnText: {
-    color: DD.lime,
-    fontWeight: '700',
-    fontSize: 12,
-  },
-  modalConfirmRejectBtn: {
-    backgroundColor: DD.danger,
-    paddingHorizontal: DD.s5,
-    paddingVertical: DD.s3,
-    borderRadius: DD.radiusPill,
-    minWidth: 120,
-    alignItems: 'center',
-  },
-  modalConfirmRejectText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-});
 
-const detailStatStyles = StyleSheet.create({
-  box: {
-    flex: 1,
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusLg,
-    paddingVertical: DD.s3,
-    paddingHorizontal: DD.s2,
+  /* Success State in Modal */
+  successStateBox: {
     alignItems: 'center',
+    paddingVertical: DD_SPACING.lg,
+    gap: DD_SPACING.sm,
+  },
+  successIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(191, 253, 64, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: DD_SPACING.xs,
+  },
+  successMsg: {
+    maxWidth: 280,
+    lineHeight: 18,
+  },
+  successProofBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: DD_SPACING.sm,
+    backgroundColor: 'rgba(0, 212, 255, 0.08)',
     borderWidth: 1,
-    borderColor: DD.border,
+    borderColor: 'rgba(0, 212, 255, 0.25)',
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    marginVertical: DD_SPACING.sm,
   },
-  icon: {
-    fontSize: 20,
-    marginBottom: DD.s1,
+  successProofNotice: {
+    flex: 1,
+    lineHeight: 18,
   },
-  value: {
-    fontSize: 17,
-    fontWeight: '900',
-    letterSpacing: -0.5,
+  modalSuccessBtn: {
+    marginTop: DD_SPACING.xs,
   },
-  label: {
-    fontSize: 11,
-    color: DD.textMuted,
-    fontWeight: '600',
-    marginTop: 2,
+
+  /* Invite Friends Modal */
+  friendsLoadingBox: {
+    paddingVertical: DD_SPACING['3xl'],
+    alignItems: 'center',
+  },
+  friendsEmptyBox: {
+    paddingVertical: DD_SPACING.xl,
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+  },
+  friendsEmptyIconCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: DD_COLORS.bgHighlight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  friendsEmptyDesc: {
+    maxWidth: 280,
+    lineHeight: 18,
+    marginBottom: DD_SPACING.sm,
+  },
+  friendsListScroll: {
+    marginTop: DD_SPACING.xs,
+  },
+  friendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    marginBottom: DD_SPACING.xs,
+    minHeight: 56,
+  },
+  friendRowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    flex: 1,
+    paddingRight: DD_SPACING.sm,
+  },
+  friendMeta: {
+    flex: 1,
   },
 });

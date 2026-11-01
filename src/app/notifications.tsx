@@ -1,18 +1,25 @@
 import { router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
-  FlatList,
   Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
-  Text,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { DD } from '@/constants/dd-theme';
+import {
+  DD_COLORS,
+  DD_RADII,
+  DD_SPACING,
+} from '@/constants/dd-theme';
+import { DDButton } from '@/components/ui/dd-button';
+import { DDCard } from '@/components/ui/dd-card';
+import { DDIcon, type DDIconName } from '@/components/ui/dd-icon';
+import { DDSkeleton } from '@/components/ui/dd-skeleton';
+import { DDText } from '@/components/ui/dd-text';
 import { useAuth } from '@/lib/auth-context';
 import {
   AppNotification,
@@ -24,6 +31,23 @@ import {
 } from '@/lib/inbox';
 import { useChallenges } from '@/store/challenges-store';
 
+interface EventBadgeConfig {
+  icon: DDIconName;
+  label: string;
+  color: string;
+}
+
+/**
+ * DareDrop Redesigned Notifications Screen.
+ *
+ * Implements:
+ * - Dark-first DareDrop visual language with neon lime & electric violet accents.
+ * - Calendar grouping: Today, Yesterday, and Earlier.
+ * - Distinct event badges with Phosphor icons (reviews, friend requests, approvals, invites).
+ * - Glowing unread indicator bar and 1-tap navigation to deep routes.
+ * - Optimistic unread count management and "Mark all read" action.
+ * - Empty inbox, guest explorer, and pull-to-refresh states.
+ */
 export default function NotificationsScreen() {
   const insets = useSafeAreaInsets();
   const { refreshUnreadNotificationsCount, decrementUnreadCount } = useChallenges();
@@ -126,85 +150,65 @@ export default function NotificationsScreen() {
 
   const unreadCount = notifications.filter((n) => !n.isRead).length;
 
-  const getEventBadge = (eventType: string) => {
+  const getEventBadge = (eventType: string): EventBadgeConfig => {
     switch (eventType) {
       case 'submission_pending':
-        return { icon: '📋', label: 'Review Request', color: DD.catFun };
+        return { icon: 'shield-check', label: 'Review Request', color: DD_COLORS.coral };
       case 'dare_approved':
-        return { icon: '🎉', label: 'Dare Approved', color: DD.lime };
+        return { icon: 'check-circle', label: 'Dare Approved', color: DD_COLORS.lime };
       case 'dare_rejected':
-        return { icon: '❌', label: 'Dare Rejected', color: '#FF4D4D' };
+        return { icon: 'x-circle', label: 'Dare Rejected', color: DD_COLORS.danger };
       case 'verifier_reassigned':
-        return { icon: '🔄', label: 'Verifier Assigned', color: DD.purple };
+        return { icon: 'refresh', label: 'Verifier Assigned', color: DD_COLORS.purple };
       case 'friend_request_received':
-        return { icon: '👋', label: 'Friend Request', color: DD.catFun };
+        return { icon: 'user-plus', label: 'Friend Request', color: DD_COLORS.catFun };
       case 'friend_request_accepted':
-        return { icon: '🤝', label: 'Friend Connected', color: DD.lime };
+        return { icon: 'handshake', label: 'Friend Connected', color: DD_COLORS.lime };
       case 'challenge_invitation_received':
-        return { icon: '⚡', label: 'Dare Invitation', color: DD.purple };
+        return { icon: 'lightning', label: 'Dare Invitation', color: DD_COLORS.purple };
       default:
-        return { icon: '🔔', label: 'Update', color: DD.textSub };
+        return { icon: 'bell', label: 'Update', color: DD_COLORS.textSub };
     }
   };
 
-  const renderItem = ({ item }: { item: AppNotification }) => {
-    const badge = getEventBadge(item.eventType);
-    const route = getNotificationRoute(item);
-    const hasAction = Boolean(route);
+  // Group notifications chronologically into Today, Yesterday, and Earlier
+  const notificationGroups = useMemo(() => {
+    if (notifications.length === 0) return [];
 
-    return (
-      <Pressable
-        onPress={() => handleNotificationPress(item)}
-        style={({ pressed }) => [
-          styles.itemCard,
-          !item.isRead && styles.itemCardUnread,
-          pressed && styles.itemCardPressed,
-        ]}>
-        {/* Unread indicator bar */}
-        {!item.isRead && <View style={styles.unreadIndicator} />}
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const yesterday = new Date(now.getTime() - 86400000);
+    const yesterdayStr = yesterday.toISOString().split('T')[0];
 
-        <View style={styles.cardHeader}>
-          <View style={[styles.badgePill, { borderColor: badge.color + '44' }]}>
-            <Text style={styles.badgeIcon}>{badge.icon}</Text>
-            <Text style={[styles.badgeLabel, { color: badge.color }]}>{badge.label}</Text>
-          </View>
-          <Text style={styles.timestamp}>{formatNotificationTimestamp(item.createdAt)}</Text>
-        </View>
+    const todayItems: AppNotification[] = [];
+    const yesterdayItems: AppNotification[] = [];
+    const earlierItems: AppNotification[] = [];
 
-        <Text style={[styles.itemTitle, !item.isRead && styles.itemTitleUnread]}>
-          {item.title}
-        </Text>
-        {Boolean(item.body) && <Text style={styles.itemBody}>{item.body}</Text>}
+    for (const notif of notifications) {
+      const itemDateStr = notif.createdAt ? notif.createdAt.split('T')[0] : '';
+      if (itemDateStr === todayStr) {
+        todayItems.push(notif);
+      } else if (itemDateStr === yesterdayStr) {
+        yesterdayItems.push(notif);
+      } else {
+        earlierItems.push(notif);
+      }
+    }
 
-        {/* Rejection note callout if present */}
-        {Boolean(item.rejectionReason) && (
-          <View style={styles.rejectionBox}>
-            <Text style={styles.rejectionLabel}>Note from Verifier:</Text>
-            <Text style={styles.rejectionText}>&ldquo;{item.rejectionReason}&rdquo;</Text>
-          </View>
-        )}
+    const groups: { title: string; data: AppNotification[] }[] = [];
+    if (todayItems.length > 0) groups.push({ title: 'TODAY', data: todayItems });
+    if (yesterdayItems.length > 0) groups.push({ title: 'YESTERDAY', data: yesterdayItems });
+    if (earlierItems.length > 0) groups.push({ title: 'EARLIER', data: earlierItems });
 
-        {hasAction && (
-          <View style={styles.actionFooter}>
-            <Text style={styles.actionLink}>
-              {item.eventType === 'submission_pending' || item.eventType === 'verifier_reassigned'
-                ? 'Review submission →'
-                : item.eventType.startsWith('friend_')
-                  ? 'View friends →'
-                  : 'View dare →'}
-            </Text>
-          </View>
-        )}
-      </Pressable>
-    );
-  };
+    return groups;
+  }, [notifications]);
 
   return (
-    <View style={styles.container}>
+    <View style={styles.root}>
       <StatusBar style="light" />
 
-      {/* Header */}
-      <View style={[styles.header, { paddingTop: insets.top + DD.s3 }]}>
+      {/* Navigation Header */}
+      <View style={[styles.navBar, { paddingTop: insets.top + DD_SPACING.sm }]}>
         <Pressable
           onPress={() => {
             if (router.canGoBack()) {
@@ -214,17 +218,24 @@ export default function NotificationsScreen() {
             }
           }}
           hitSlop={12}
-          style={styles.backButton}
+          style={({ pressed }) => [styles.backBtn, pressed && styles.btnPressed]}
           accessibilityRole="button"
           accessibilityLabel="Back">
-          <Text style={styles.backButtonText}>←</Text>
+          <DDIcon name="arrow-left" size={16} color={DD_COLORS.lime} weight="bold" />
+          <DDText variant="caption" color="lime" bold>
+            Back
+          </DDText>
         </Pressable>
 
-        <View style={styles.headerTitleWrap}>
-          <Text style={styles.headerTitle}>Notifications</Text>
+        <View style={styles.headerTitleGroup}>
+          <DDText variant="h3" color="primary" bold>
+            Notifications
+          </DDText>
           {unreadCount > 0 && (
-            <View style={styles.headerCountPill}>
-              <Text style={styles.headerCountText}>{unreadCount}</Text>
+            <View style={styles.unreadPill}>
+              <DDText variant="caption" color="lime" bold>
+                {unreadCount > 99 ? '99+' : `${unreadCount} unread`}
+              </DDText>
             </View>
           )}
         </View>
@@ -233,320 +244,369 @@ export default function NotificationsScreen() {
           <Pressable
             onPress={handleMarkAllRead}
             hitSlop={8}
-            style={styles.markAllButton}
+            style={({ pressed }) => [styles.markAllBtn, pressed && styles.btnPressed]}
             accessibilityRole="button"
             accessibilityLabel="Mark all as read">
-            <Text style={styles.markAllText}>Mark all read</Text>
+            <DDText variant="caption" color="lime" bold>
+              Mark all read
+            </DDText>
           </Pressable>
         ) : (
-          <View style={styles.headerSpacer} />
+          <View style={{ width: 60 }} />
         )}
       </View>
 
-      {/* Body */}
-      {isGuest ? (
-        <View style={styles.centered}>
-          <View style={styles.emptyIconWrap}>
-            <Text style={styles.emptyIcon}>🔒</Text>
-          </View>
-          <Text style={styles.emptyTitle}>Sign in to view notifications</Text>
-          <Text style={styles.emptySubtitle}>
-            Create an account or sign in to receive dare notifications, reviews, and verifier requests.
-          </Text>
-          <Pressable
-            onPress={() =>
-              showAuthModal({
-                title: 'Sign In for Notifications',
-                description: 'Create an account or sign in to stay updated on your dares.',
-              })
-            }
-            style={styles.retryButton}
-            accessibilityRole="button"
-            accessibilityLabel="Sign in">
-            <Text style={styles.retryButtonText}>Sign In / Register</Text>
-          </Pressable>
-        </View>
-      ) : loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator color={DD.lime} size="large" />
-          <Text style={styles.loadingText}>Loading notifications...</Text>
-        </View>
-      ) : error ? (
-        <View style={styles.centered}>
-          <Text style={styles.errorIcon}>⚠️</Text>
-          <Text style={styles.errorTitle}>Could not load inbox</Text>
-          <Text style={styles.errorMessage}>{error}</Text>
-          <Pressable
-            onPress={() => loadNotifications(true)}
-            style={styles.retryButton}
-            accessibilityRole="button"
-            accessibilityLabel="Retry loading notifications">
-            <Text style={styles.retryButtonText}>Retry</Text>
-          </Pressable>
-        </View>
-      ) : notifications.length === 0 ? (
-        <View style={styles.centered}>
-          <View style={styles.emptyIconWrap}>
-            <Text style={styles.emptyIcon}>🔔</Text>
-          </View>
-          <Text style={styles.emptyTitle}>All caught up!</Text>
-          <Text style={styles.emptySubtitle}>
-            When friends submit proof for dares, review your submissions, or assign you as a verifier,
-            you&apos;ll see them right here.
-          </Text>
-        </View>
-      ) : (
-        <FlatList
-          data={notifications}
-          keyExtractor={(item) => item.id}
-          renderItem={renderItem}
-          contentContainerStyle={[
-            styles.listContent,
-            { paddingBottom: insets.bottom + DD.s6 },
-          ]}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={() => loadNotifications(true)}
-              tintColor={DD.lime}
-              colors={[DD.lime]}
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={[
+          styles.content,
+          { paddingBottom: insets.bottom + DD_SPACING['3xl'] },
+        ]}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => loadNotifications(true)}
+            tintColor={DD_COLORS.lime}
+            colors={[DD_COLORS.lime]}
+          />
+        }>
+
+        {/* Guest Explorer Prompt */}
+        {isGuest ? (
+          <DDCard variant="element" padding="lg" style={styles.guestCard}>
+            <View style={styles.guestIconCircle}>
+              <DDIcon name="lock" size={28} color={DD_COLORS.purple} weight="bold" />
+            </View>
+            <DDText variant="h3" color="primary" style={styles.guestTitle}>
+              Sign in for notifications
+            </DDText>
+            <DDText variant="bodySm" color="secondary" style={styles.guestSubtitle}>
+              Create an account or sign in to receive live alerts when friends challenge you, submit proof, or verify your dares.
+            </DDText>
+            <DDButton
+              variant="primary"
+              title="Sign In / Register"
+              iconRight="arrow-right"
+              onPress={() =>
+                showAuthModal({
+                  title: 'Sign In to View Notifications',
+                  description: 'Create an account to track peer verifications and friend invites.',
+                })
+              }
+              style={styles.guestBtn}
             />
-          }
-          showsVerticalScrollIndicator={false}
-        />
-      )}
+          </DDCard>
+        ) : loading && notifications.length === 0 ? (
+          /* Loading Skeletons */
+          <View style={styles.skeletonList}>
+            <DDSkeleton.Card />
+            <DDSkeleton.Card />
+            <DDSkeleton.Card />
+          </View>
+        ) : error ? (
+          /* Error State Banner */
+          <DDCard variant="element" padding="lg" style={styles.errorCard}>
+            <DDIcon name="warning" size={24} color={DD_COLORS.danger} weight="bold" />
+            <DDText variant="bodySm" color="danger" style={styles.errorText}>
+              {error}
+            </DDText>
+            <DDButton
+              variant="secondary"
+              title="Retry Loading"
+              iconLeft="refresh"
+              onPress={() => loadNotifications(false)}
+            />
+          </DDCard>
+        ) : notifications.length === 0 ? (
+          /* Empty State */
+          <DDCard variant="element" padding="lg" style={styles.emptyCard}>
+            <View style={styles.emptyIconCircle}>
+              <DDIcon name="bell" size={28} color={DD_COLORS.textMuted} weight="bold" />
+            </View>
+            <DDText variant="h3" color="primary" style={styles.emptyTitle}>
+              No notifications yet
+            </DDText>
+            <DDText variant="bodySm" color="secondary" style={styles.emptySubtitle}>
+              You&apos;re all caught up! Peer verification requests, friend invites, and dare updates will appear here.
+            </DDText>
+          </DDCard>
+        ) : (
+          /* Grouped Notification Feed */
+          notificationGroups.map((group) => (
+            <View key={group.title} style={styles.groupSection}>
+              <View style={styles.groupHeader}>
+                <DDText variant="label" color="muted" style={styles.groupTitle}>
+                  {group.title}
+                </DDText>
+              </View>
+
+              {group.data.map((item) => {
+                const badge = getEventBadge(item.eventType);
+                const route = getNotificationRoute(item);
+                const hasAction = Boolean(route);
+
+                return (
+                  <Pressable
+                    key={item.id}
+                    onPress={() => handleNotificationPress(item)}
+                    android_ripple={{ color: 'rgba(255, 255, 255, 0.08)' }}
+                    style={({ pressed }) => [
+                      styles.itemCard,
+                      !item.isRead && styles.itemCardUnread,
+                      pressed && styles.itemCardPressed,
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel={item.title}>
+                    {/* Glowing Left Unread Indicator */}
+                    {!item.isRead && <View style={styles.unreadBar} />}
+
+                    <View style={styles.itemHeader}>
+                      <View style={[styles.badgePill, { borderColor: badge.color + '40', backgroundColor: badge.color + '18' }]}>
+                        <DDIcon name={badge.icon} size={12} color={badge.color} weight="fill" />
+                        <DDText variant="caption" style={{ color: badge.color }} bold>
+                          {badge.label}
+                        </DDText>
+                      </View>
+
+                      <DDText variant="caption" color="muted">
+                        {formatNotificationTimestamp(item.createdAt)}
+                      </DDText>
+                    </View>
+
+                    <DDText
+                      variant="title"
+                      color="primary"
+                      bold={!item.isRead}
+                      style={styles.itemTitle}>
+                      {item.title}
+                    </DDText>
+
+                    {Boolean(item.body) && (
+                      <DDText variant="bodySm" color="secondary" style={styles.itemBody}>
+                        {item.body}
+                      </DDText>
+                    )}
+
+                    {/* Rejection Note Callout */}
+                    {Boolean(item.rejectionReason) && (
+                      <View style={styles.rejectionBox}>
+                        <DDText variant="caption" color="danger" bold>
+                          Note from Verifier:
+                        </DDText>
+                        <DDText variant="bodySm" color="primary" style={styles.rejectionText}>
+                          &ldquo;{item.rejectionReason}&rdquo;
+                        </DDText>
+                      </View>
+                    )}
+
+                    {/* Action Route Hint Footer */}
+                    {hasAction && (
+                      <View style={styles.actionFooter}>
+                        <DDText variant="caption" color="lime" bold>
+                          {item.eventType === 'submission_pending' || item.eventType === 'verifier_reassigned'
+                            ? 'Review submission'
+                            : item.eventType.startsWith('friend_')
+                              ? 'View friends'
+                              : 'View dare'}
+                        </DDText>
+                        <DDIcon name="arrow-right" size={12} color={DD_COLORS.lime} weight="bold" />
+                      </View>
+                    )}
+                  </Pressable>
+                );
+              })}
+            </View>
+          ))
+        )}
+      </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  root: {
     flex: 1,
-    backgroundColor: DD.bg,
+    backgroundColor: DD_COLORS.bg,
   },
-  header: {
+  scroll: {
+    flex: 1,
+  },
+  content: {
+    paddingHorizontal: DD_SPACING.lg,
+    gap: DD_SPACING.lg,
+  },
+  navBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: DD.s4,
-    paddingBottom: DD.s3,
-    borderBottomWidth: 1,
-    borderBottomColor: DD.border,
-    backgroundColor: DD.bgCard,
+    paddingHorizontal: DD_SPACING.lg,
+    paddingBottom: DD_SPACING.sm,
   },
-  backButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: DD.bgElement,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  backButtonText: {
-    color: DD.text,
-    fontSize: 20,
-    fontWeight: '700',
-    marginTop: -2,
-  },
-  headerTitleWrap: {
+  backBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s2,
+    gap: 4,
+    paddingVertical: DD_SPACING.xs,
+    paddingRight: DD_SPACING.sm,
   },
-  headerTitle: {
-    color: DD.text,
-    fontSize: 18,
-    fontWeight: '800',
-    letterSpacing: 0.3,
+  btnPressed: {
+    opacity: 0.8,
   },
-  headerCountPill: {
-    backgroundColor: DD.lime,
-    paddingHorizontal: 7,
-    paddingVertical: 1,
-    borderRadius: DD.radiusPill,
-  },
-  headerCountText: {
-    color: DD.bg,
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  markAllButton: {
-    paddingHorizontal: DD.s2,
-    paddingVertical: DD.s1,
-  },
-  markAllText: {
-    color: DD.lime,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  headerSpacer: {
-    width: 38,
-  },
-  centered: {
-    flex: 1,
+  headerTitleGroup: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: DD.s6,
+    gap: DD_SPACING.sm,
   },
-  loadingText: {
-    marginTop: DD.s3,
-    color: DD.textSub,
-    fontSize: 14,
-  },
-  errorIcon: {
-    fontSize: 36,
-    marginBottom: DD.s2,
-  },
-  errorTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: DD.text,
-    marginBottom: DD.s1,
-  },
-  errorMessage: {
-    fontSize: 13,
-    color: DD.textSub,
-    textAlign: 'center',
-    marginBottom: DD.s4,
-  },
-  retryButton: {
-    backgroundColor: DD.lime,
-    paddingHorizontal: DD.s5,
-    paddingVertical: DD.s2,
-    borderRadius: DD.radiusPill,
-  },
-  retryButtonText: {
-    color: DD.bg,
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  emptyIconWrap: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: DD.bgCard,
-    alignItems: 'center',
-    justifyContent: 'center',
+  unreadPill: {
+    backgroundColor: 'rgba(191, 253, 64, 0.12)',
     borderWidth: 1,
-    borderColor: DD.border,
-    marginBottom: DD.s4,
+    borderColor: 'rgba(191, 253, 64, 0.3)',
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 3,
+    borderRadius: DD_RADII.pill,
   },
-  emptyIcon: {
-    fontSize: 32,
+  markAllBtn: {
+    paddingVertical: DD_SPACING.xs,
+    paddingLeft: DD_SPACING.sm,
   },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: DD.text,
-    marginBottom: DD.s2,
+  guestCard: {
+    alignItems: 'center',
+    textAlign: 'center',
+    marginTop: DD_SPACING.md,
   },
-  emptySubtitle: {
-    fontSize: 13,
-    color: DD.textSub,
+  guestIconCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(155, 89, 255, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: DD_SPACING.md,
+  },
+  guestTitle: {
+    textAlign: 'center',
+    marginBottom: DD_SPACING.xs,
+  },
+  guestSubtitle: {
     textAlign: 'center',
     lineHeight: 20,
-    maxWidth: 280,
+    marginBottom: DD_SPACING.lg,
   },
-  listContent: {
-    padding: DD.s4,
-    gap: DD.s3,
+  guestBtn: {
+    minWidth: 200,
+  },
+  skeletonList: {
+    gap: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
+  },
+  errorCard: {
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    marginTop: DD_SPACING.md,
+  },
+  errorText: {
+    textAlign: 'center',
+  },
+  emptyCard: {
+    alignItems: 'center',
+    textAlign: 'center',
+    marginTop: DD_SPACING.md,
+  },
+  emptyIconCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: DD_SPACING.md,
+  },
+  emptyTitle: {
+    textAlign: 'center',
+    marginBottom: DD_SPACING.xs,
+  },
+  emptySubtitle: {
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  groupSection: {
+    gap: DD_SPACING.sm,
+  },
+  groupHeader: {
+    marginTop: DD_SPACING.xs,
+  },
+  groupTitle: {
+    letterSpacing: 1.2,
+    fontSize: 11,
+    textTransform: 'uppercase',
   },
   itemCard: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusMd,
-    borderWidth: 1,
-    borderColor: DD.border,
-    padding: DD.s4,
     position: 'relative',
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.card,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    padding: DD_SPACING.md,
+    gap: 6,
     overflow: 'hidden',
   },
   itemCardUnread: {
-    borderColor: DD.lime + '55',
-    backgroundColor: '#181C23',
+    backgroundColor: 'rgba(18, 18, 28, 0.95)',
+    borderColor: 'rgba(191, 253, 64, 0.25)',
   },
   itemCardPressed: {
-    opacity: 0.85,
+    opacity: 0.9,
+    transform: [{ scale: 0.99 }],
   },
-  unreadIndicator: {
+  unreadBar: {
     position: 'absolute',
-    top: 0,
     left: 0,
+    top: 0,
     bottom: 0,
-    width: 3,
-    backgroundColor: DD.lime,
+    width: 3.5,
+    backgroundColor: DD_COLORS.lime,
   },
-  cardHeader: {
+  itemHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: DD.s2,
+    justifyContent: 'space-between',
+    marginBottom: 2,
   },
   badgePill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    backgroundColor: DD.bgElement,
-    paddingHorizontal: 8,
+    paddingHorizontal: DD_SPACING.sm,
     paddingVertical: 3,
-    borderRadius: DD.radiusPill,
+    borderRadius: DD_RADII.pill,
     borderWidth: 1,
   },
-  badgeIcon: {
-    fontSize: 11,
-  },
-  badgeLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  timestamp: {
-    fontSize: 11,
-    color: DD.textSub,
-  },
   itemTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: DD.textSub,
-    marginBottom: 4,
-  },
-  itemTitleUnread: {
-    color: DD.text,
-    fontWeight: '800',
+    fontSize: 15,
   },
   itemBody: {
-    fontSize: 13,
-    color: DD.textSub,
-    lineHeight: 18,
+    lineHeight: 19,
   },
   rejectionBox: {
-    marginTop: DD.s2,
-    backgroundColor: '#2A1818',
-    borderRadius: DD.radiusSm,
-    padding: DD.s2,
-    borderLeftWidth: 3,
-    borderLeftColor: '#FF4D4D',
-  },
-  rejectionLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#FF8888',
-    marginBottom: 2,
+    backgroundColor: 'rgba(255, 59, 86, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 59, 86, 0.25)',
+    borderRadius: DD_RADII.md,
+    padding: DD_SPACING.sm,
+    gap: 2,
+    marginTop: DD_SPACING.xs,
   },
   rejectionText: {
-    fontSize: 12,
-    color: '#FFEAEA',
     fontStyle: 'italic',
   },
   actionFooter: {
-    marginTop: DD.s3,
-    paddingTop: DD.s2,
-    borderTopWidth: 1,
-    borderTopColor: DD.border + '66',
     flexDirection: 'row',
-    justifyContent: 'flex-end',
-  },
-  actionLink: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: DD.lime,
+    alignItems: 'center',
+    gap: 4,
+    marginTop: DD_SPACING.xs,
+    paddingTop: DD_SPACING.xs,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.04)',
   },
 });

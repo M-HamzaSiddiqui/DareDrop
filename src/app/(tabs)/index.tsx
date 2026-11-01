@@ -1,24 +1,50 @@
 import { router, useFocusEffect } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
-  Text,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CategoryFilter, ChallengeCard } from '@/components/dd/challenge-card';
-import { CATEGORY_COLORS, CategoryKey, DD } from '@/constants/dd-theme';
+import {
+  CategoryKey,
+  DD_COLORS,
+  DD_RADII,
+  DD_SPACING,
+} from '@/constants/dd-theme';
+import { DDAvatar } from '@/components/ui/dd-avatar';
+import { DDBadge } from '@/components/ui/dd-badge';
+import { DDButton } from '@/components/ui/dd-button';
+import { DDCard } from '@/components/ui/dd-card';
+import { DDIcon } from '@/components/ui/dd-icon';
+import { DDSkeleton } from '@/components/ui/dd-skeleton';
+import { DDText } from '@/components/ui/dd-text';
 import { formatSubmittedAt } from '@/lib/reviews';
+import { useAuth } from '@/lib/auth-context';
 import { useChallenges } from '@/store/challenges-store';
 
+/**
+ * DareDrop Redesigned Home Dashboard.
+ *
+ * Implements:
+ * - Personalized header with branding, user greeting, and notification badge
+ * - Prominent Streak Hero Card displaying active streak and motivational encouragement
+ * - Compact Quick Statistics strip (Active Dares, Total Available, Pending Verifications)
+ * - Verifier Review Queue with clear challenger metadata and direct review actions
+ * - User's Active Dares section for quick access to pledged challenges
+ * - Interactive Category filter chips with instant feed sorting
+ * - Clean loading skeletons, empty states, and dismissible offline notices
+ * - 48dp+ touch targets, Android ripple feedback, and safe-area dock clearance
+ */
 export default function HomeScreen() {
   const {
     challenges,
+    loading,
     refreshing,
     refreshChallenges,
     isBackendConnected,
@@ -27,17 +53,63 @@ export default function HomeScreen() {
     error,
     unreadNotificationsCount,
     refreshUnreadNotificationsCount,
+    fetchParticipantProgress,
   } = useChallenges();
+  const { userDisplayName, isRegistered, isAnonymous } = useAuth();
   const insets = useSafeAreaInsets();
+
   const [selectedCategory, setSelectedCategory] = useState<CategoryKey | 'All'>('All');
   const [dismissNotice, setDismissNotice] = useState(false);
+  const [activeStreak, setActiveStreak] = useState<number>(0);
+  const [streakChallengeTitle, setStreakChallengeTitle] = useState<string>('');
 
-  // Keep pending reviews and unread notifications fresh when this screen comes into focus
+  // Joined challenges
+  const joinedChallenges = useMemo(
+    () => challenges.filter((c) => c.joined),
+    [challenges],
+  );
+  const joinedCount = joinedChallenges.length;
+
+  // Compute active streak for joined daily challenges
+  const loadStreakInfo = useCallback(async () => {
+    if (joinedChallenges.length === 0) {
+      setActiveStreak(0);
+      setStreakChallengeTitle('');
+      return;
+    }
+
+    try {
+      // Find highest streak among active joined challenges
+      let maxStreak = 0;
+      let topTitle = '';
+
+      for (const c of joinedChallenges) {
+        if (c.challengeType === 'daily') {
+          const progress = await fetchParticipantProgress(c.id);
+          if (progress && typeof progress.current_streak === 'number') {
+            if (progress.current_streak > maxStreak) {
+              maxStreak = progress.current_streak;
+              topTitle = c.title;
+            }
+          }
+        }
+      }
+
+      setActiveStreak(maxStreak);
+      setStreakChallengeTitle(topTitle || joinedChallenges[0]?.title || '');
+    } catch {
+      // Graceful fallback to 0 streak on error
+      setActiveStreak(0);
+    }
+  }, [joinedChallenges, fetchParticipantProgress]);
+
+  // Keep pending reviews, unread count, and streak fresh when focused
   useFocusEffect(
     useCallback(() => {
       refreshPendingReviews().catch(() => {});
       refreshUnreadNotificationsCount().catch(() => {});
-    }, [refreshPendingReviews, refreshUnreadNotificationsCount]),
+      loadStreakInfo().catch(() => {});
+    }, [refreshPendingReviews, refreshUnreadNotificationsCount, loadStreakInfo]),
   );
 
   const handleRefresh = useCallback(async () => {
@@ -45,15 +117,25 @@ export default function HomeScreen() {
       refreshChallenges(),
       refreshPendingReviews(),
       refreshUnreadNotificationsCount(),
+      loadStreakInfo(),
     ]);
-  }, [refreshChallenges, refreshPendingReviews, refreshUnreadNotificationsCount]);
+  }, [refreshChallenges, refreshPendingReviews, refreshUnreadNotificationsCount, loadStreakInfo]);
 
+  // Category filter
   const filtered = useMemo(() => {
     if (selectedCategory === 'All') return challenges;
     return challenges.filter((c) => c.category === selectedCategory);
   }, [challenges, selectedCategory]);
 
-  const joinedCount = challenges.filter((c) => c.joined).length;
+  // User greeting name
+  const greetingName = useMemo(() => {
+    if (userDisplayName && userDisplayName.trim()) {
+      return userDisplayName.trim().split(' ')[0];
+    }
+    if (isRegistered) return 'Challenger';
+    if (isAnonymous) return 'Hero';
+    return 'Guest';
+  }, [userDisplayName, isRegistered, isAnonymous]);
 
   return (
     <View style={styles.root}>
@@ -64,113 +146,256 @@ export default function HomeScreen() {
           <RefreshControl
             refreshing={refreshing}
             onRefresh={handleRefresh}
-            tintColor={DD.lime}
-            colors={[DD.lime]}
+            tintColor={DD_COLORS.lime}
+            colors={[DD_COLORS.lime]}
           />
         }
         contentContainerStyle={[
           styles.content,
           {
-            paddingTop: insets.top + DD.s5,
-            paddingBottom: insets.bottom + 100,
+            paddingTop: insets.top + DD_SPACING.lg,
+            paddingBottom: insets.bottom + 108, // Generous clearance above floating bottom dock
           },
         ]}
         showsVerticalScrollIndicator={false}>
-        {/* Header */}
+        {/* A. Header Section */}
         <View style={styles.header}>
-          <View>
-            <Text style={styles.tagline}>DARE DROP</Text>
-            <Text style={styles.headline}>Make today{'\n'}legendary.</Text>
+          <View style={styles.headerLeft}>
+            <View style={styles.brandRow}>
+              <View style={styles.flameIconWrapper}>
+                <DDIcon name="flame" size={16} color={DD_COLORS.lime} weight="fill" />
+              </View>
+              <DDText variant="caption" color="lime" bold style={styles.tagline}>
+                DARE DROP
+              </DDText>
+            </View>
+            <DDText variant="display" color="primary" style={styles.greetingTitle}>
+              Hey, {greetingName}
+            </DDText>
+            <DDText variant="bodySm" color="secondary" style={styles.greetingSubtitle}>
+              Make today legendary.
+            </DDText>
           </View>
+
           <View style={styles.headerRight}>
+            {/* Notification Bell Shortcut */}
             <Pressable
               onPress={() => router.push('/notifications')}
-              style={styles.bellButton}
+              android_ripple={{ color: 'rgba(255, 255, 255, 0.1)', borderless: true, radius: 24 }}
+              style={styles.iconButton}
               accessibilityRole="button"
-              accessibilityLabel="Notifications">
-              <Text style={styles.bellIcon}>🔔</Text>
+              accessibilityLabel={`Notifications, ${unreadNotificationsCount} unread`}>
+              <DDIcon
+                name="bell"
+                size={20}
+                color={unreadNotificationsCount > 0 ? DD_COLORS.lime : DD_COLORS.textSub}
+                weight={unreadNotificationsCount > 0 ? 'fill' : 'bold'}
+              />
               {unreadNotificationsCount > 0 && (
                 <View style={styles.bellBadge}>
-                  <Text style={styles.bellBadgeText}>
+                  <DDText variant="caption" color="inverse" style={styles.bellBadgeText}>
                     {unreadNotificationsCount > 99 ? '99+' : unreadNotificationsCount}
-                  </Text>
+                  </DDText>
                 </View>
               )}
             </Pressable>
-            <View style={styles.statsBadge}>
-              <Text style={styles.statsBadgeNumber}>{joinedCount}</Text>
-              <Text style={styles.statsBadgeLabel}>Active</Text>
-            </View>
+
+            {/* Profile Avatar Shortcut */}
+            <Pressable
+              onPress={() => router.push('/profile')}
+              android_ripple={{ color: 'rgba(255, 255, 255, 0.1)', borderless: true, radius: 24 }}
+              style={styles.avatarButton}
+              accessibilityRole="button"
+              accessibilityLabel="View profile">
+              <DDAvatar
+                name={userDisplayName || 'Challenger'}
+                size="sm"
+                borderColor={DD_COLORS.borderProminent}
+              />
+            </Pressable>
           </View>
         </View>
 
-        {/* Backend status banner if running in local mode */}
+        {/* Offline / Local mode notice banner */}
         {!isBackendConnected && !dismissNotice && (
-          <View style={styles.localBanner}>
-            <View style={styles.localBannerLeft}>
-              <Text style={styles.localBannerIcon}>📱</Text>
-              <View style={styles.localBannerTexts}>
-                <Text style={styles.localBannerTitle}>Local Storage Mode</Text>
-                <Text style={styles.localBannerSubtitle}>
-                  Add Supabase keys to .env to sync dares & invite friends across devices.
-                </Text>
-              </View>
+          <View style={styles.noticeBanner}>
+            <View style={styles.noticeIconWrapper}>
+              <DDIcon name="info" size={18} color={DD_COLORS.info} weight="bold" />
+            </View>
+            <View style={styles.noticeTexts}>
+              <DDText variant="label" customColor={DD_COLORS.info} bold>
+                Local Storage Mode
+              </DDText>
+              <DDText variant="caption" color="secondary">
+                Configure Supabase to sync dares & invite friends across devices.
+              </DDText>
             </View>
             <Pressable
               onPress={() => setDismissNotice(true)}
-              style={styles.localBannerDismiss}
+              hitSlop={12}
+              style={styles.noticeDismiss}
               accessibilityRole="button"
               accessibilityLabel="Dismiss notice">
-              <Text style={styles.localBannerDismissText}>✕</Text>
+              <DDIcon name="x" size={16} color={DD_COLORS.textMuted} weight="bold" />
             </Pressable>
           </View>
         )}
 
-        {/* Backend connection / auth error banner */}
+        {/* Connection / Backend Error Banner */}
         {isBackendConnected && Boolean(error) && (
           <View style={styles.errorBanner}>
-            <View style={styles.errorBannerLeft}>
-              <Text style={styles.errorBannerIcon}>⚠️</Text>
-              <View style={styles.errorBannerTexts}>
-                <Text style={styles.errorBannerTitle}>Supabase Connection Issue</Text>
-                <Text style={styles.errorBannerSubtitle}>{error}</Text>
-              </View>
+            <View style={styles.errorIconWrapper}>
+              <DDIcon name="warning" size={18} color={DD_COLORS.warning} weight="bold" />
+            </View>
+            <View style={styles.errorTexts}>
+              <DDText variant="label" color="warning" bold>
+                Connection Interrupted
+              </DDText>
+              <DDText variant="caption" color="secondary" numberOfLines={2}>
+                {error}
+              </DDText>
             </View>
             <Pressable
               onPress={handleRefresh}
-              style={styles.errorBannerRetry}
+              style={styles.errorRetryButton}
               accessibilityRole="button"
-              accessibilityLabel="Retry connecting to Supabase">
-              <Text style={styles.errorBannerRetryText}>Retry</Text>
+              accessibilityLabel="Retry connection">
+              <DDText variant="caption" color="warning" bold>
+                Retry
+              </DDText>
             </Pressable>
           </View>
         )}
 
-        {/* Stats strip */}
-        <View style={styles.statsStrip}>
-          <StatItem value={String(challenges.length)} label="Challenges" color={DD.lime} />
-          <View style={styles.divider} />
-          <StatItem
-            value={String(challenges.reduce((a, c) => a + c.participants, 0))}
-            label="Participants"
-            color={DD.purple}
-          />
-          <View style={styles.divider} />
-          <StatItem value={String(joinedCount)} label="Joined" color={DD.catFun} />
-        </View>
+        {/* B. Streak Hero Card */}
+        <View style={styles.streakCardWrapper}>
+          <View style={styles.streakGlow} />
+          <DDCard variant="highlight" padding="none" style={styles.streakCard}>
+            <View style={styles.streakInner}>
+              <View style={styles.streakLeft}>
+                <View style={styles.streakBadgePill}>
+                  <DDIcon name="flame" size={18} color={DD_COLORS.lime} weight="fill" />
+                  <DDText variant="caption" color="lime" bold style={styles.streakPillText}>
+                    DAILY MOMENTUM
+                  </DDText>
+                </View>
 
-        {/* Pending Reviews Section for Verifier */}
-        {pendingReviews.length > 0 && (
-          <View style={styles.pendingSection}>
-            <View style={styles.pendingSectionHeader}>
-              <View style={styles.pendingTitleRow}>
-                <Text style={styles.pendingSectionIcon}>📋</Text>
-                <Text style={styles.pendingSectionTitle}>Pending Reviews</Text>
-                <View style={styles.pendingBadge}>
-                  <Text style={styles.pendingBadgeText}>{pendingReviews.length}</Text>
+                <View style={styles.streakCountRow}>
+                  <DDText variant="display" color="primary" style={styles.streakNumber}>
+                    {activeStreak}
+                  </DDText>
+                  <View style={styles.streakLabelCol}>
+                    <DDText variant="h3" color="lime" style={styles.streakDaysLabel}>
+                      {activeStreak === 1 ? 'DAY STREAK' : 'DAYS STREAK'}
+                    </DDText>
+                    <DDText variant="caption" color="secondary">
+                      {activeStreak > 0
+                        ? 'Unstoppable consistency'
+                        : joinedCount > 0
+                          ? 'Complete today’s dare'
+                          : 'Ignite your first streak'}
+                    </DDText>
+                  </View>
+                </View>
+
+                <DDText variant="bodySm" color="secondary" style={styles.streakMotivation}>
+                  {activeStreak > 0
+                    ? `You're on fire! Keep crushing "${streakChallengeTitle}" today.`
+                    : joinedCount > 0
+                      ? `You have ${joinedCount} active dare${joinedCount > 1 ? 's' : ''}. Submit proof to level up your streak!`
+                      : 'Take on a challenge from below and submit your first proof to ignite your flame.'}
+                </DDText>
+              </View>
+
+              <View style={styles.streakRight}>
+                <View style={styles.flameArtCircle}>
+                  <DDIcon
+                    name="flame"
+                    size={46}
+                    color={activeStreak > 0 ? DD_COLORS.lime : DD_COLORS.textMuted}
+                    weight="fill"
+                  />
                 </View>
               </View>
-              <Text style={styles.pendingNoticeText}>Verification Needed</Text>
+            </View>
+          </DDCard>
+        </View>
+
+        {/* C. Quick Statistics Strip */}
+        <View style={styles.statsStrip}>
+          {/* 1. Active Dares */}
+          <DDCard variant="card" padding="sm" style={styles.statCard}>
+            <View style={styles.statIconBadge}>
+              <DDIcon name="target" size={16} color={DD_COLORS.lime} weight="bold" />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statNumber}>
+              {joinedCount}
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Active Dares
+            </DDText>
+          </DDCard>
+
+          {/* 2. Total Challenges */}
+          <DDCard variant="card" padding="sm" style={styles.statCard}>
+            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(155, 89, 255, 0.12)' }]}>
+              <DDIcon name="compass" size={16} color={DD_COLORS.purple} weight="bold" />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statNumber}>
+              {challenges.length}
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Available Dares
+            </DDText>
+          </DDCard>
+
+          {/* 3. Pending Reviews */}
+          <DDCard variant="card" padding="sm" style={styles.statCard}>
+            <View
+              style={[
+                styles.statIconBadge,
+                {
+                  backgroundColor:
+                    pendingReviews.length > 0
+                      ? 'rgba(255, 107, 53, 0.15)'
+                      : 'rgba(112, 112, 148, 0.12)',
+                },
+              ]}>
+              <DDIcon
+                name="verify"
+                size={16}
+                color={pendingReviews.length > 0 ? DD_COLORS.coral : DD_COLORS.textMuted}
+                weight="bold"
+              />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statNumber}>
+              {pendingReviews.length}
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Reviews Due
+            </DDText>
+          </DDCard>
+        </View>
+
+        {/* D. Pending Verifier Reviews Section */}
+        {pendingReviews.length > 0 && (
+          <View style={styles.sectionContainer}>
+            <View style={styles.sectionHeaderRow}>
+              <View style={styles.sectionTitleGroup}>
+                <DDIcon name="verify" size={20} color={DD_COLORS.coral} weight="fill" />
+                <DDText variant="h3" color="primary" style={styles.sectionTitle}>
+                  Pending Verifications
+                </DDText>
+                <DDBadge
+                  label={String(pendingReviews.length)}
+                  variant="coral"
+                  size="sm"
+                  style={styles.sectionCounterBadge}
+                />
+              </View>
+              <DDText variant="caption" color="secondary">
+                Action Required
+              </DDText>
             </View>
 
             <View style={styles.pendingList}>
@@ -183,94 +408,184 @@ export default function HomeScreen() {
                       params: { id: item.completion.id },
                     })
                   }
+                  android_ripple={{ color: 'rgba(255, 107, 53, 0.1)' }}
                   style={({ pressed }) => [
-                    styles.pendingCard,
-                    pressed && { opacity: 0.85, transform: [{ scale: 0.99 }] },
+                    styles.pendingCardPressable,
+                    pressed && styles.cardPressed,
                   ]}
                   accessibilityRole="button"
                   accessibilityLabel={`Review completion for ${item.challengeTitle}`}>
-                  <View style={styles.pendingCardTop}>
-                    <Text style={styles.pendingChallengeTitle} numberOfLines={1}>
-                      {item.challengeTitle}
-                    </Text>
-                    <View style={styles.pendingStatusPill}>
-                      <Text style={styles.pendingStatusText}>⏳ Verify</Text>
+                  <DDCard variant="card" padding="md" style={styles.pendingCardBody}>
+                    <View style={styles.pendingCardTop}>
+                      <View style={styles.pendingUserRow}>
+                        <DDAvatar name={item.participantName} size="sm" />
+                        <View style={styles.pendingUserMeta}>
+                          <DDText variant="label" color="primary" bold numberOfLines={1}>
+                            {item.participantName}
+                          </DDText>
+                          <DDText variant="caption" color="muted">
+                            Submitted proof
+                          </DDText>
+                        </View>
+                      </View>
+
+                      <DDBadge
+                        label="Verify Dare"
+                        variant="warning"
+                        size="sm"
+                        icon="verify"
+                      />
                     </View>
-                  </View>
 
-                  <Text style={styles.pendingChallengerText}>
-                    Challenger: <Text style={styles.boldWhite}>{item.participantName}</Text>
-                  </Text>
+                    <DDText variant="h3" color="primary" numberOfLines={1} style={styles.pendingChallengeTitle}>
+                      {item.challengeTitle}
+                    </DDText>
 
-                  <View style={styles.pendingCardFooter}>
-                    <Text style={styles.pendingTimestamp}>
-                      📅 {item.completion.completion_date} • {formatSubmittedAt(item.completion.submitted_at)}
-                    </Text>
-                    <Text style={styles.openReviewAction}>Review Dare →</Text>
-                  </View>
+                    {item.completion.submission_note ? (
+                      <View style={styles.pendingNoteContainer}>
+                        <DDText variant="caption" color="secondary" numberOfLines={2} style={styles.pendingNoteText}>
+                          &quot;{item.completion.submission_note}&quot;
+                        </DDText>
+                      </View>
+                    ) : null}
 
-                  {item.completion.submission_note ? (
-                    <Text style={styles.pendingNote} numberOfLines={1}>
-                      &quot;{item.completion.submission_note}&quot;
-                    </Text>
-                  ) : null}
+                    <View style={styles.pendingCardFooter}>
+                      <View style={styles.pendingTimeRow}>
+                        <DDIcon name="clock" size={13} color={DD_COLORS.textMuted} weight="bold" />
+                        <DDText variant="caption" color="muted">
+                          {formatSubmittedAt(item.completion.submitted_at)}
+                        </DDText>
+                      </View>
+
+                      <View style={styles.pendingActionCTA}>
+                        <DDText variant="caption" color="coral" bold>
+                          Review Now
+                        </DDText>
+                        <DDIcon name="arrow-right" size={13} color={DD_COLORS.coral} weight="bold" />
+                      </View>
+                    </View>
+                  </DDCard>
                 </Pressable>
               ))}
             </View>
           </View>
         )}
 
-        {/* Section label */}
-        <Text style={styles.sectionLabel}>🔥 Trending Challenges</Text>
+        {/* E. My Active Dares (if user has joined any) */}
+        {joinedChallenges.length > 0 && (
+          <View style={styles.sectionContainer}>
+            <View style={styles.sectionHeaderRow}>
+              <View style={styles.sectionTitleGroup}>
+                <DDIcon name="target" size={20} color={DD_COLORS.lime} weight="fill" />
+                <DDText variant="h3" color="primary" style={styles.sectionTitle}>
+                  My Active Dares
+                </DDText>
+                <DDBadge
+                  label={String(joinedCount)}
+                  variant="lime"
+                  size="sm"
+                  style={styles.sectionCounterBadge}
+                />
+              </View>
+            </View>
 
-        {/* Category filter */}
-        <CategoryFilter selected={selectedCategory} onSelect={setSelectedCategory} />
-
-        {/* Challenge cards */}
-        {filtered.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyIcon}>
-              {selectedCategory !== 'All'
-                ? CATEGORY_COLORS[selectedCategory as CategoryKey]
-                  ? '🔍'
-                  : '🔍'
-                : '🔍'}
-            </Text>
-            <Text style={styles.emptyTitle}>No challenges here</Text>
-            <Text style={styles.emptyText}>Try a different category or create your own!</Text>
+            <View style={styles.activeChallengesList}>
+              {joinedChallenges.slice(0, 3).map((challenge) => (
+                <ChallengeCard
+                  key={`active_${challenge.id}`}
+                  challenge={challenge}
+                  onPress={() =>
+                    router.push({
+                      pathname: '/challenge/[id]',
+                      params: { id: challenge.id },
+                    })
+                  }
+                />
+              ))}
+            </View>
           </View>
-        ) : (
-          filtered.map((challenge) => (
-            <ChallengeCard
-              key={challenge.id}
-              challenge={challenge}
-              onPress={() =>
-                router.push({
-                  pathname: '/challenge/[id]',
-                  params: { id: challenge.id },
-                })
-              }
-            />
-          ))
         )}
-      </ScrollView>
-    </View>
-  );
-}
 
-function StatItem({
-  value,
-  label,
-  color,
-}: {
-  value: string;
-  label: string;
-  color: string;
-}) {
-  return (
-    <View style={styles.statItem}>
-      <Text style={[styles.statValue, { color }]}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
+        {/* F. Categories & Trending Challenges */}
+        <View style={styles.sectionContainer}>
+          <View style={styles.sectionHeaderRow}>
+            <View style={styles.sectionTitleGroup}>
+              <DDIcon name="flame" size={20} color={DD_COLORS.lime} weight="fill" />
+              <DDText variant="h3" color="primary" style={styles.sectionTitle}>
+                Explore Challenges
+              </DDText>
+            </View>
+
+            <Pressable
+              onPress={() => router.push('/discover')}
+              hitSlop={8}
+              style={styles.browseAllButton}
+              accessibilityRole="button"
+              accessibilityLabel="Browse all challenges in Discover">
+              <DDText variant="caption" color="lime" bold>
+                View all
+              </DDText>
+              <DDIcon name="arrow-right" size={13} color={DD_COLORS.lime} weight="bold" />
+            </Pressable>
+          </View>
+
+          {/* Interactive Category Filter Chips */}
+          <CategoryFilter selected={selectedCategory} onSelect={setSelectedCategory} />
+
+          {/* Challenge Feed Cards / Loading / Empty States */}
+          {loading && challenges.length === 0 ? (
+            <View style={styles.skeletonList}>
+              <DDSkeleton.Card />
+              <DDSkeleton.Card />
+            </View>
+          ) : filtered.length === 0 ? (
+            <DDCard variant="element" padding="lg" style={styles.emptyCard}>
+              <View style={styles.emptyIconCircle}>
+                <DDIcon name="search" size={26} color={DD_COLORS.textMuted} weight="bold" />
+              </View>
+              <DDText variant="h3" color="primary" align="center" style={styles.emptyTitle}>
+                No challenges found
+              </DDText>
+              <DDText variant="bodySm" color="secondary" align="center" style={styles.emptyDescription}>
+                {selectedCategory !== 'All'
+                  ? `There are currently no challenges in the ${selectedCategory} category.`
+                  : 'No challenges are currently active. Be the first to start a dare!'}
+              </DDText>
+
+              <View style={styles.emptyActionsRow}>
+                {selectedCategory !== 'All' && (
+                  <DDButton
+                    title="Clear Filter"
+                    variant="secondary"
+                    size="sm"
+                    onPress={() => setSelectedCategory('All')}
+                  />
+                )}
+                <DDButton
+                  title="Create a Dare"
+                  variant="primary"
+                  size="sm"
+                  iconLeft="plus"
+                  onPress={() => router.push('/create')}
+                />
+              </View>
+            </DDCard>
+          ) : (
+            filtered.map((challenge) => (
+              <ChallengeCard
+                key={challenge.id}
+                challenge={challenge}
+                onPress={() =>
+                  router.push({
+                    pathname: '/challenge/[id]',
+                    params: { id: challenge.id },
+                  })
+                }
+              />
+            ))
+          )}
+        </View>
+      </ScrollView>
     </View>
   );
 }
@@ -278,58 +593,73 @@ function StatItem({
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: DD.bg,
+    backgroundColor: DD_COLORS.bg,
   },
   scroll: {
     flex: 1,
   },
   content: {
-    paddingHorizontal: DD.s5,
+    paddingHorizontal: DD_SPACING.lg,
   },
+
+  /* Header */
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    marginBottom: DD.s5,
+    marginBottom: DD_SPACING.xl,
+  },
+  headerLeft: {
+    flex: 1,
+    paddingRight: DD_SPACING.md,
+  },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: DD_SPACING.xs,
+  },
+  flameIconWrapper: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(191, 253, 64, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   tagline: {
     fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 3,
-    color: DD.lime,
-    marginBottom: DD.s2,
+    letterSpacing: 2.5,
   },
-  headline: {
-    fontSize: 36,
-    fontWeight: '900',
-    color: DD.text,
-    letterSpacing: -1.2,
-    lineHeight: 40,
+  greetingTitle: {
+    letterSpacing: -1,
+    lineHeight: 38,
+  },
+  greetingSubtitle: {
+    marginTop: 2,
   },
   headerRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s2,
+    gap: DD_SPACING.sm,
+    paddingTop: 4,
   },
-  bellButton: {
+  iconButton: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: DD.bgElement,
+    backgroundColor: DD_COLORS.bgElement,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: DD.border,
+    borderColor: DD_COLORS.borderSubtle,
     position: 'relative',
-  },
-  bellIcon: {
-    fontSize: 18,
   },
   bellBadge: {
     position: 'absolute',
-    top: -4,
-    right: -4,
-    backgroundColor: DD.lime,
+    top: -2,
+    right: -2,
+    backgroundColor: DD_COLORS.lime,
     minWidth: 18,
     height: 18,
     borderRadius: 9,
@@ -337,288 +667,320 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
-    borderColor: DD.bg,
+    borderColor: DD_COLORS.bg,
   },
   bellBadgeText: {
-    color: DD.bg,
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '900',
+    lineHeight: 11,
   },
-  statsBadge: {
-    backgroundColor: DD.bgElement,
-    borderRadius: DD.radiusCard,
-    padding: DD.s4,
+  avatarButton: {
+    padding: 2,
+  },
+
+  /* Banners */
+  noticeBanner: {
+    flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: 'rgba(0, 212, 255, 0.08)',
+    borderRadius: DD_RADII.md,
     borderWidth: 1,
-    borderColor: DD.border,
-    minWidth: 64,
+    borderColor: 'rgba(0, 212, 255, 0.25)',
+    padding: DD_SPACING.md,
+    marginBottom: DD_SPACING.lg,
+    gap: DD_SPACING.sm,
   },
-  statsBadgeNumber: {
-    fontSize: 24,
-    fontWeight: '900',
-    color: DD.lime,
+  noticeIconWrapper: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0, 212, 255, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  statsBadgeLabel: {
+  noticeTexts: {
+    flex: 1,
+    gap: 2,
+  },
+  noticeDismiss: {
+    padding: DD_SPACING.xs,
+  },
+
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 184, 0, 0.08)',
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 184, 0, 0.25)',
+    padding: DD_SPACING.md,
+    marginBottom: DD_SPACING.lg,
+    gap: DD_SPACING.sm,
+  },
+  errorIconWrapper: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 184, 0, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  errorTexts: {
+    flex: 1,
+    gap: 2,
+  },
+  errorRetryButton: {
+    paddingHorizontal: DD_SPACING.md,
+    paddingVertical: DD_SPACING.xs,
+    borderRadius: DD_RADII.pill,
+    backgroundColor: 'rgba(255, 184, 0, 0.15)',
+  },
+
+  /* Streak Hero Card */
+  streakCardWrapper: {
+    position: 'relative',
+    marginBottom: DD_SPACING.xl,
+  },
+  streakGlow: {
+    position: 'absolute',
+    top: 0,
+    left: 20,
+    right: 20,
+    bottom: 0,
+    backgroundColor: 'rgba(191, 253, 64, 0.05)',
+    borderRadius: DD_RADII.card,
+  },
+  streakCard: {
+    backgroundColor: 'rgba(18, 18, 28, 0.96)',
+    borderRadius: DD_RADII.card,
+    borderWidth: 1.5,
+    borderColor: 'rgba(191, 253, 64, 0.35)',
+    overflow: 'hidden',
+  },
+  streakInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: DD_SPACING.xl,
+  },
+  streakLeft: {
+    flex: 1,
+    paddingRight: DD_SPACING.md,
+  },
+  streakBadgePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(191, 253, 64, 0.12)',
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 3,
+    borderRadius: DD_RADII.pill,
+    marginBottom: DD_SPACING.sm,
+  },
+  streakPillText: {
     fontSize: 10,
-    fontWeight: '600',
-    color: DD.textSub,
-    marginTop: 2,
+    letterSpacing: 1.2,
   },
+  streakCountRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.xs,
+  },
+  streakNumber: {
+    fontSize: 44,
+    lineHeight: 48,
+    fontWeight: '900',
+    color: DD_COLORS.lime,
+  },
+  streakLabelCol: {
+    justifyContent: 'center',
+  },
+  streakDaysLabel: {
+    fontSize: 16,
+    letterSpacing: 0.5,
+    lineHeight: 20,
+  },
+  streakMotivation: {
+    lineHeight: 18,
+    marginTop: 4,
+  },
+  streakRight: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  flameArtCircle: {
+    width: 74,
+    height: 74,
+    borderRadius: 37,
+    backgroundColor: 'rgba(191, 253, 64, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(191, 253, 64, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  /* Stats Strip */
   statsStrip: {
     flexDirection: 'row',
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusCard,
-    borderWidth: 1,
-    borderColor: DD.border,
-    padding: DD.s5,
-    marginBottom: DD.s6,
-    alignItems: 'center',
-    justifyContent: 'space-around',
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.xl,
   },
-  statItem: {
-    alignItems: 'center',
+  statCard: {
     flex: 1,
+    alignItems: 'center',
+    paddingVertical: DD_SPACING.md,
+    paddingHorizontal: DD_SPACING.xs,
+    borderRadius: DD_RADII.lg,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
   },
-  statValue: {
-    fontSize: 20,
+  statIconBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(191, 253, 64, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+  },
+  statNumber: {
+    fontSize: 22,
+    lineHeight: 26,
     fontWeight: '900',
-    letterSpacing: -0.5,
   },
   statLabel: {
     fontSize: 11,
-    color: DD.textSub,
-    marginTop: 2,
     fontWeight: '600',
-  },
-  divider: {
-    width: 1,
-    height: 32,
-    backgroundColor: DD.border,
-  },
-  sectionLabel: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: DD.text,
-    letterSpacing: -0.3,
-    marginBottom: DD.s1,
-  },
-  emptyState: {
-    alignItems: 'center',
-    paddingVertical: DD.s10,
-    gap: DD.s3,
-  },
-  emptyIcon: {
-    fontSize: 48,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  emptyText: {
-    fontSize: 14,
-    color: DD.textSub,
     textAlign: 'center',
-  },
-  localBanner: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: DD.bgCard,
-    borderWidth: 1,
-    borderColor: DD.border,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    marginBottom: DD.s5,
-  },
-  localBannerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: DD.s3,
-    flex: 1,
-  },
-  localBannerIcon: {
-    fontSize: 20,
-  },
-  localBannerTexts: {
-    flex: 1,
-  },
-  localBannerTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  localBannerSubtitle: {
-    fontSize: 11,
-    color: DD.textMuted,
-    lineHeight: 15,
     marginTop: 2,
   },
-  localBannerDismiss: {
-    padding: DD.s2,
+
+  /* Section Containers */
+  sectionContainer: {
+    marginBottom: DD_SPACING.xl,
   },
-  localBannerDismissText: {
-    fontSize: 14,
-    color: DD.textMuted,
-    fontWeight: '800',
-  },
-  errorBanner: {
+  sectionHeaderRow: {
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#FF446618',
-    borderWidth: 1,
-    borderColor: '#FF446655',
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    marginBottom: DD.s5,
+    marginBottom: DD_SPACING.md,
   },
-  errorBannerLeft: {
+  sectionTitleGroup: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s3,
-    flex: 1,
+    gap: DD_SPACING.sm,
   },
-  errorBannerIcon: {
-    fontSize: 20,
+  sectionTitle: {
+    letterSpacing: -0.2,
   },
-  errorBannerTexts: {
-    flex: 1,
+  sectionCounterBadge: {
+    marginLeft: 2,
   },
-  errorBannerTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: '#FF6B81',
-  },
-  errorBannerSubtitle: {
-    fontSize: 11,
-    color: DD.textSub,
-    lineHeight: 15,
-    marginTop: 2,
-  },
-  errorBannerRetry: {
-    paddingHorizontal: DD.s3,
-    paddingVertical: DD.s2,
-    backgroundColor: DD.bgCard,
-    borderWidth: 1,
-    borderColor: DD.border,
-    borderRadius: DD.radiusSm,
-    marginLeft: DD.s2,
-  },
-  errorBannerRetryText: {
-    fontSize: 12,
-    color: DD.text,
-    fontWeight: '700',
-  },
-  pendingSection: {
-    marginBottom: DD.s6,
-    gap: DD.s3,
-  },
-  pendingSectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: DD.s1,
-  },
-  pendingTitleRow: {
+  browseAllButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s2,
+    gap: 4,
   },
-  pendingSectionIcon: {
-    fontSize: 18,
-  },
-  pendingSectionTitle: {
-    fontSize: 17,
-    fontWeight: '900',
-    color: DD.text,
-    letterSpacing: -0.3,
-  },
-  pendingBadge: {
-    backgroundColor: '#FFB80022',
-    paddingHorizontal: DD.s2 + 2,
-    paddingVertical: 2,
-    borderRadius: DD.radiusPill,
-    borderWidth: 1,
-    borderColor: '#FFB800',
-  },
-  pendingBadgeText: {
-    color: '#FFB800',
-    fontSize: 11,
-    fontWeight: '900',
-  },
-  pendingNoticeText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#FFB800',
-    letterSpacing: 0.5,
-  },
+
+  /* Pending Reviews */
   pendingList: {
-    gap: DD.s3,
+    gap: DD_SPACING.md,
   },
-  pendingCard: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusCard,
-    padding: DD.s4,
-    borderWidth: 1,
-    borderColor: '#FFB80055',
-    gap: DD.s2,
+  pendingCardPressable: {
+    borderRadius: DD_RADII.card,
+  },
+  cardPressed: {
+    opacity: 0.9,
+    transform: [{ scale: 0.985 }],
+  },
+  pendingCardBody: {
+    borderColor: 'rgba(255, 107, 53, 0.3)',
+    borderWidth: 1.2,
   },
   pendingCardTop: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: DD.s2,
+    justifyContent: 'space-between',
+    marginBottom: DD_SPACING.sm,
+  },
+  pendingUserRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+  },
+  pendingUserMeta: {
+    justifyContent: 'center',
   },
   pendingChallengeTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: DD.text,
-    flex: 1,
+    marginBottom: DD_SPACING.xs,
   },
-  pendingStatusPill: {
-    backgroundColor: '#FFB80022',
-    paddingHorizontal: DD.s3,
-    paddingVertical: DD.s1,
-    borderRadius: DD.radiusPill,
-    borderWidth: 1,
-    borderColor: '#FFB800',
+  pendingNoteContainer: {
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    paddingHorizontal: DD_SPACING.md,
+    paddingVertical: DD_SPACING.xs,
+    borderRadius: DD_RADII.sm,
+    borderLeftWidth: 2,
+    borderLeftColor: DD_COLORS.coral,
+    marginBottom: DD_SPACING.sm,
   },
-  pendingStatusText: {
-    color: '#FFB800',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  pendingChallengerText: {
-    fontSize: 13,
-    color: DD.textSub,
-  },
-  boldWhite: {
-    color: DD.text,
-    fontWeight: '700',
+  pendingNoteText: {
+    fontStyle: 'italic',
   },
   pendingCardFooter: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingTop: DD.s1,
+    justifyContent: 'space-between',
+    paddingTop: DD_SPACING.xs,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.04)',
   },
-  pendingTimestamp: {
-    fontSize: 11,
-    color: DD.textMuted,
+  pendingTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
-  openReviewAction: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: DD.lime,
+  pendingActionCTA: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
-  pendingNote: {
-    fontSize: 12,
-    color: DD.textSub,
-    fontStyle: 'italic',
-    backgroundColor: DD.bgElement,
-    paddingHorizontal: DD.s3,
-    paddingVertical: DD.s2,
-    borderRadius: DD.radiusSm,
+
+  /* Active Challenges */
+  activeChallengesList: {
+    gap: DD_SPACING.sm,
+  },
+
+  /* Empty and Loading States */
+  skeletonList: {
+    gap: DD_SPACING.md,
+  },
+  emptyCard: {
+    alignItems: 'center',
+    paddingVertical: DD_SPACING['2xl'],
+    gap: DD_SPACING.sm,
+  },
+  emptyIconCircle: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: DD_COLORS.bgHighlight,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: DD_SPACING.xs,
+  },
+  emptyTitle: {
+    marginTop: DD_SPACING.xs,
+  },
+  emptyDescription: {
+    maxWidth: 280,
+    lineHeight: 18,
+    marginBottom: DD_SPACING.sm,
+  },
+  emptyActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
   },
 });

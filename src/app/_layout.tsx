@@ -1,4 +1,5 @@
 import { DarkTheme, ThemeProvider, Stack } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 
@@ -14,8 +15,21 @@ import {
   registerForPushNotificationsAsync,
 } from '@/lib/notifications';
 import { ChallengesProvider } from '@/store/challenges-store';
+import { DD_COLORS } from '@/constants/dd-theme';
 
 SplashScreen.preventAutoHideAsync();
+
+const DareDropTheme = {
+  ...DarkTheme,
+  colors: {
+    ...DarkTheme.colors,
+    background: DD_COLORS.bg,
+    card: DD_COLORS.bgCard,
+    text: DD_COLORS.text,
+    border: DD_COLORS.borderSubtle,
+    primary: DD_COLORS.lime,
+  },
+};
 
 function NotificationSync() {
   const { currentUserId, isGuest, isRegistered } = useAuth();
@@ -57,13 +71,19 @@ function NotificationSync() {
 
 export default function RootLayout() {
   return (
-    <ThemeProvider value={DarkTheme}>
+    <ThemeProvider value={DareDropTheme}>
       <AuthProvider>
         <ChallengesProvider>
+          <StatusBar style="light" />
           <NotificationSync />
           <AuthPromptModal />
           <AnimatedSplashOverlay />
-          <Stack screenOptions={{ headerShown: false }}>
+          <Stack
+            screenOptions={{
+              headerShown: false,
+              contentStyle: { backgroundColor: DD_COLORS.bg },
+              animation: 'fade',
+            }}>
             <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
             <Stack.Screen name="auth" options={{ presentation: 'modal', headerShown: false }} />
             <Stack.Screen name="auth/callback" options={{ headerShown: false }} />
@@ -78,5 +98,3 @@ export default function RootLayout() {
     </ThemeProvider>
   );
 }
-
-

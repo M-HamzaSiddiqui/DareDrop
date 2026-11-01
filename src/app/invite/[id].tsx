@@ -1,22 +1,60 @@
 import { router, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
-  Text,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { CATEGORY_COLORS, CATEGORY_EMOJIS, CategoryKey, DD } from '@/constants/dd-theme';
-import { calculateProgress, Challenge, formatParticipants, timeRemaining } from '@/data/challenges';
+import {
+  CATEGORY_COLORS,
+  CategoryKey,
+  DD_COLORS,
+  DD_RADII,
+  DD_SPACING,
+} from '@/constants/dd-theme';
+import {
+  calculateProgress,
+  Challenge,
+  formatParticipants,
+  timeRemaining,
+} from '@/data/challenges';
 import { copyInviteLink, shareChallenge } from '@/lib/sharing';
 import { useAuth } from '@/lib/auth-context';
 import { useChallenges } from '@/store/challenges-store';
+import { DDAvatar } from '@/components/ui/dd-avatar';
+import { DDBadge } from '@/components/ui/dd-badge';
+import { DDButton } from '@/components/ui/dd-button';
+import { DDCard } from '@/components/ui/dd-card';
+import { DDIcon, type DDIconName } from '@/components/ui/dd-icon';
+import { DDText } from '@/components/ui/dd-text';
 
+const CATEGORY_ICONS: Record<CategoryKey, DDIconName> = {
+  Fitness: 'flame',
+  Focus: 'target',
+  Fun: 'sparkle',
+  Learning: 'compass',
+};
+
+/**
+ * DareDrop Redesigned Invitation Screen.
+ *
+ * Implements:
+ * - Clean dark-first aesthetic matching Challenge Details
+ * - Neon Lime and Electric Violet accents
+ * - Header navigation with Phosphor icons, share trigger, and joined status
+ * - Prominent "You've Been Dared" invitation banner with creator avatar
+ * - Hero challenge card with category/type badges and creator attribution
+ * - 3-metric statistics grid (Challengers, Time Left, Duration)
+ * - Challenge timeline progress bar
+ * - The DareDrop Pact commitment rules with numbered badges
+ * - Quick copy/share link actions
+ * - Floating bottom CTA with 48dp touch targets and joining loading state
+ */
 export default function InviteScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { challenges, fetchChallengeById, joinChallenge, isUserJoined } = useChallenges();
@@ -53,9 +91,8 @@ export default function InviteScreen() {
           setError('Challenge not found. This dare may have ended or the invite link is invalid.');
         }
       } catch (err: any) {
-        if (isMounted) {
-          setError(err?.message || 'Failed to connect. Check your network or credentials.');
-        }
+        if (!isMounted) return;
+        setError(err?.message || 'Failed to connect. Check your network or credentials.');
       } finally {
         if (isMounted) setLoading(false);
       }
@@ -79,6 +116,7 @@ export default function InviteScreen() {
       });
       return;
     }
+
     setIsJoining(true);
     try {
       const res = await joinChallenge(challenge.id);
@@ -108,7 +146,7 @@ export default function InviteScreen() {
     if (!challenge) return;
     const res = await copyInviteLink(challenge);
     if (res.success) {
-      setCopiedToast('✓ Invite link copied!');
+      setCopiedToast('Invite link copied to clipboard!');
       setTimeout(() => setCopiedToast(null), 2500);
     }
   }
@@ -118,42 +156,63 @@ export default function InviteScreen() {
     await shareChallenge(challenge);
   }
 
-  // Loading State
+  function handleBack() {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/');
+    }
+  }
+
+  // 1. Loading State
   if (loading) {
     return (
-      <View style={[styles.root, styles.center]}>
+      <View style={[styles.root, styles.centerContainer]}>
         <StatusBar style="light" />
-        <ActivityIndicator size="large" color={DD.lime} />
-        <Text style={styles.loadingTitle}>Resolving Invite…</Text>
-        <Text style={styles.loadingSubtitle}>Fetching challenge details from DareDrop</Text>
+        <View style={styles.loadingCard}>
+          <ActivityIndicator size="large" color={DD_COLORS.lime} />
+          <DDText variant="h2" color="primary" style={styles.loadingTitle}>
+            Resolving Dare Invite…
+          </DDText>
+          <DDText variant="caption" color="secondary">
+            Fetching challenge details from DareDrop
+          </DDText>
+        </View>
       </View>
     );
   }
 
-  // Error / Invalid ID State
+  // 2. Error / Invalid ID State
   if (error || !challenge) {
     return (
-      <View style={[styles.root, styles.center, { paddingHorizontal: DD.s5 }]}>
+      <View style={[styles.root, styles.centerContainer]}>
         <StatusBar style="light" />
-        <Text style={styles.errorIcon}>⚠️</Text>
-        <Text style={styles.errorTitle}>Invite Expired or Invalid</Text>
-        <Text style={styles.errorSubtitle}>
-          {error || 'We could not find the challenge linked to this invite URL.'}
-        </Text>
-        <Pressable
-          onPress={() => router.push('/')}
-          style={({ pressed }) => [styles.exploreBtn, pressed && { opacity: 0.85 }]}
-          accessibilityRole="button"
-          accessibilityLabel="Browse active challenges">
-          <Text style={styles.exploreBtnText}>Browse Active Dares →</Text>
-        </Pressable>
+        <DDCard variant="card" padding="lg" style={styles.errorCard}>
+          <View style={styles.errorIconContainer}>
+            <DDIcon name="warning" size={32} color={DD_COLORS.coral} weight="bold" />
+          </View>
+          <DDText variant="h2" color="primary" align="center" style={styles.errorTitle}>
+            Invite Expired or Invalid
+          </DDText>
+          <DDText variant="body" color="secondary" align="center" style={styles.errorSubtitle}>
+            {error || 'We could not find the challenge linked to this invite URL.'}
+          </DDText>
+          <DDButton
+            title="Browse Active Dares →"
+            variant="primary"
+            fullWidth
+            onPress={() => router.replace('/')}
+            style={styles.errorCta}
+          />
+        </DDCard>
       </View>
     );
   }
 
-  const catColor = CATEGORY_COLORS[challenge.category as CategoryKey] || DD.lime;
-  const emoji = CATEGORY_EMOJIS[challenge.category as CategoryKey] || '⚡';
+  const catColor = CATEGORY_COLORS[challenge.category as CategoryKey] || DD_COLORS.lime;
+  const catIcon = CATEGORY_ICONS[challenge.category as CategoryKey] || 'flame';
   const timeLeft = timeRemaining(challenge.endsAt);
+  const isDaily = challenge.challengeType === 'daily';
   const alreadyJoined = isUserJoined(challenge.id) || challenge.joined || justJoined;
 
   const { daysElapsed, progressPct } = calculateProgress(
@@ -165,31 +224,44 @@ export default function InviteScreen() {
     <View style={styles.root}>
       <StatusBar style="light" />
 
-      {/* Floating toast */}
+      {/* Floating toast notification */}
       {copiedToast ? (
-        <View style={[styles.toast, { top: insets.top + DD.s6 }]}>
-          <Text style={styles.toastText}>{copiedToast}</Text>
+        <View style={[styles.toastContainer, { top: insets.top + DD_SPACING.sm }]}>
+          <DDIcon name="check-circle" size={16} color={DD_COLORS.lime} weight="fill" />
+          <DDText variant="caption" color="lime" bold style={styles.toastText}>
+            {copiedToast}
+          </DDText>
         </View>
       ) : null}
 
       {/* Header bar */}
-      <View style={[styles.navBar, { paddingTop: insets.top + DD.s2 }]}>
+      <View style={[styles.navBar, { paddingTop: insets.top + DD_SPACING.xs }]}>
         <Pressable
-          onPress={() => router.push('/')}
-          style={({ pressed }) => [styles.navBtn, pressed && { opacity: 0.75 }]}
+          onPress={handleBack}
+          android_ripple={{ color: 'rgba(255, 255, 255, 0.12)', borderless: true, radius: 24 }}
+          style={styles.navIconButton}
           accessibilityRole="button"
-          accessibilityLabel="Home">
-          <Text style={styles.navBtnText}>🏠 DareDrop</Text>
+          accessibilityLabel="Go back">
+          <DDIcon name="arrow-left" size={20} color={DD_COLORS.text} weight="bold" />
         </Pressable>
+
+        <DDText variant="h3" color="primary" style={styles.navHeaderTitle}>
+          Invitation
+        </DDText>
 
         <View style={styles.navRight}>
           <Pressable
             onPress={handleShare}
-            style={({ pressed }) => [styles.navBtn, pressed && { opacity: 0.75 }]}
+            android_ripple={{ color: 'rgba(255, 255, 255, 0.12)', borderless: true, radius: 24 }}
+            style={styles.navIconButton}
             accessibilityRole="button"
             accessibilityLabel="Share invite">
-            <Text style={styles.navBtnText}>📤 Share</Text>
+            <DDIcon name="share" size={20} color={DD_COLORS.text} weight="bold" />
           </Pressable>
+
+          {alreadyJoined && (
+            <DDBadge label="Joined" variant="success" size="sm" icon="check" />
+          )}
         </View>
       </View>
 
@@ -197,135 +269,218 @@ export default function InviteScreen() {
         style={styles.scroll}
         contentContainerStyle={[
           styles.content,
-          { paddingBottom: insets.bottom + 140 },
+          { paddingBottom: insets.bottom + 120 },
         ]}
         showsVerticalScrollIndicator={false}>
-        {/* Invite Banner */}
+        {/* A. Invitation Hero Greeting */}
         <View style={styles.inviteBanner}>
-          <Text style={styles.bannerBadge}>INVITATION</Text>
-          <Text style={styles.bannerHeadline}>{"You've been dared! ⚔️"}</Text>
-          <Text style={styles.bannerSubtitle}>
-            <Text style={styles.bannerCreator}>{challenge.creator}</Text> challenged you to take on this dare.
-          </Text>
+          <DDBadge label="YOU'VE BEEN DARED" variant="lime" size="sm" icon="flame" />
+          <DDText variant="display" color="primary" style={styles.bannerHeadline}>
+            Ready to accept?
+          </DDText>
+          <View style={styles.bannerSubtitleRow}>
+            <DDAvatar name={challenge.creator} size="sm" />
+            <DDText variant="body" color="secondary" style={styles.bannerSubtitleText}>
+              <DDText variant="body" color="primary" bold>
+                {challenge.creator}
+              </DDText>{' '}
+              challenged you to take on this dare.
+            </DDText>
+          </View>
         </View>
 
-        {/* Challenge Hero Card */}
-        <View style={[styles.card, { borderColor: catColor + '44' }]}>
-          <View style={[styles.categoryPill, { backgroundColor: catColor + '22' }]}>
-            <Text style={[styles.categoryText, { color: catColor }]}>
-              {emoji} {challenge.category}
-            </Text>
-          </View>
+        {/* B. Challenge Hero Card */}
+        <DDCard variant="card" padding="lg" style={[styles.heroCard, { borderColor: catColor + '44' }]}>
+          <View style={[styles.heroAccentBar, { backgroundColor: catColor }]} />
 
-          <Text style={styles.challengeTitle}>{challenge.title}</Text>
-          <Text style={styles.challengeDesc}>{challenge.description}</Text>
+          <View style={styles.heroBadgesRow}>
+            <View style={[styles.categoryPill, { backgroundColor: catColor + '1E' }]}>
+              <DDIcon name={catIcon} size={13} color={catColor} weight="fill" />
+              <DDText variant="caption" style={[styles.categoryPillText, { color: catColor }]}>
+                {challenge.category}
+              </DDText>
+            </View>
 
-          {/* Quick Metrics */}
-          <View style={styles.metricRow}>
-            <View style={styles.metricItem}>
-              <Text style={styles.metricIcon}>👥</Text>
-              <Text style={styles.metricValue}>
-                {formatParticipants(challenge.participants)}
-              </Text>
-              <Text style={styles.metricLabel}>Challengers</Text>
-            </View>
-            <View style={styles.metricDivider} />
-            <View style={styles.metricItem}>
-              <Text style={styles.metricIcon}>📅</Text>
-              <Text style={[styles.metricValue, { color: DD.lime }]}>
-                {challenge.durationDays}d
-              </Text>
-              <Text style={styles.metricLabel}>Duration</Text>
-            </View>
-            <View style={styles.metricDivider} />
-            <View style={styles.metricItem}>
-              <Text style={styles.metricIcon}>⏱</Text>
-              <Text style={[styles.metricValue, { color: DD.catFun }]}>{timeLeft}</Text>
-              <Text style={styles.metricLabel}>Time Left</Text>
-            </View>
-          </View>
-
-          {/* Timeline progress */}
-          <View style={styles.progressContainer}>
-            <View style={styles.progressHeader}>
-              <Text style={styles.progressLabel}>Challenge Timeline</Text>
-              <Text style={[styles.progressPct, { color: catColor }]}>{progressPct}%</Text>
-            </View>
-            <View style={styles.progressBar}>
-              <View
-                style={[
-                  styles.progressFill,
-                  { width: `${progressPct}%` as any, backgroundColor: catColor },
-                ]}
+            <View style={styles.typePill}>
+              <DDIcon
+                name={isDaily ? 'flame' : 'target'}
+                size={12}
+                color={isDaily ? DD_COLORS.lime : DD_COLORS.purple}
+                weight="bold"
               />
+              <DDText
+                variant="caption"
+                color={isDaily ? 'lime' : 'purple'}
+                style={styles.typePillText}>
+                {isDaily ? 'Daily Dare' : 'One-Time Dare'}
+              </DDText>
             </View>
-            <Text style={styles.progressSubtext}>
-              Day {daysElapsed + 1} of {challenge.durationDays}
-            </Text>
           </View>
+
+          <DDText variant="h1" color="primary" style={styles.challengeTitle}>
+            {challenge.title}
+          </DDText>
+
+          <DDText variant="body" color="secondary" style={styles.challengeDesc}>
+            {challenge.description}
+          </DDText>
+
+          <View style={styles.creatorRow}>
+            <DDAvatar name={challenge.creator} size="sm" />
+            <View style={styles.creatorMeta}>
+              <DDText variant="caption" color="muted">
+                Created by
+              </DDText>
+              <DDText variant="label" color="primary" bold>
+                {challenge.creator}
+              </DDText>
+            </View>
+          </View>
+        </DDCard>
+
+        {/* C. Quick Metrics Row */}
+        <View style={styles.statsGrid}>
+          <DDCard variant="card" padding="sm" style={styles.statBox}>
+            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(155, 89, 255, 0.12)' }]}>
+              <DDIcon name="users" size={16} color={DD_COLORS.purple} weight="bold" />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statValue}>
+              {formatParticipants(challenge.participants)}
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Challengers
+            </DDText>
+          </DDCard>
+
+          <DDCard variant="card" padding="sm" style={styles.statBox}>
+            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(255, 60, 172, 0.12)' }]}>
+              <DDIcon name="clock" size={16} color={DD_COLORS.catFun} weight="bold" />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statValue}>
+              {timeLeft}
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Remaining
+            </DDText>
+          </DDCard>
+
+          <DDCard variant="card" padding="sm" style={styles.statBox}>
+            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(191, 253, 64, 0.12)' }]}>
+              <DDIcon name="calendar" size={16} color={DD_COLORS.lime} weight="bold" />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statValue}>
+              {challenge.durationDays}d
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Duration
+            </DDText>
+          </DDCard>
         </View>
 
-        {/* Challenge Commitment Rules */}
-        <View style={styles.rulesCard}>
-          <Text style={styles.rulesTitle}>The DareDrop Pact</Text>
+        {/* D. Challenge Timeline */}
+        <DDCard variant="card" padding="md" style={styles.sectionCard}>
+          <View style={styles.timelineHeader}>
+            <View style={styles.timelineHeaderLeft}>
+              <DDIcon name="calendar" size={16} color={DD_COLORS.lime} weight="bold" />
+              <DDText variant="h3" color="primary" style={styles.timelineTitle}>
+                Challenge Timeline
+              </DDText>
+            </View>
+            <DDText variant="h3" style={[styles.progressPctText, { color: catColor }]}>
+              {progressPct}%
+            </DDText>
+          </View>
+
+          <View style={styles.progressTrack}>
+            <View
+              style={[
+                styles.progressFill,
+                { width: `${Math.min(100, Math.max(0, progressPct))}%` as any, backgroundColor: catColor },
+              ]}
+            />
+          </View>
+
+          <View style={styles.timelineFooter}>
+            <DDText variant="caption" color="muted">
+              Day {daysElapsed + 1} of {challenge.durationDays}
+            </DDText>
+            <DDText variant="caption" color="muted">
+              {timeLeft} left
+            </DDText>
+          </View>
+        </DDCard>
+
+        {/* E. The DareDrop Pact (Rules) */}
+        <DDCard variant="card" padding="md" style={styles.sectionCard}>
+          <View style={styles.rulesHeader}>
+            <DDIcon name="shield-check" size={18} color={DD_COLORS.lime} weight="bold" />
+            <DDText variant="h3" color="primary" style={styles.rulesTitle}>
+              The DareDrop Pact
+            </DDText>
+          </View>
+
           {[
             'Accept the dare and lock in for the full duration',
-            'Check in and share honest daily progress',
-            'Cheer on and hold your squad accountable',
+            'Check in and submit honest peer proof',
+            'Hold your squad accountable and stay consistent',
           ].map((rule, idx) => (
             <View key={idx} style={styles.ruleRow}>
-              <View style={[styles.ruleBullet, { backgroundColor: catColor }]}>
-                <Text style={styles.ruleBulletText}>{idx + 1}</Text>
+              <View style={styles.ruleNumberBadge}>
+                <DDText variant="caption" color="lime" bold>
+                  {idx + 1}
+                </DDText>
               </View>
-              <Text style={styles.ruleContent}>{rule}</Text>
+              <DDText variant="body" color="secondary" style={styles.ruleContent}>
+                {rule}
+              </DDText>
             </View>
           ))}
-        </View>
+        </DDCard>
 
-        {/* Share Section */}
-        <View style={styles.shareSection}>
-          <Pressable
+        {/* F. Share / Copy Link Card */}
+        <DDCard variant="card" padding="md" style={styles.shareCard}>
+          <View style={styles.shareCardHeader}>
+            <DDIcon name="copy" size={18} color={DD_COLORS.purple} weight="bold" />
+            <View style={styles.shareCardMeta}>
+              <DDText variant="h3" color="primary">
+                Invite Other Friends
+              </DDText>
+              <DDText variant="caption" color="secondary">
+                Share this link with your squad to compete together
+              </DDText>
+            </View>
+          </View>
+          <DDButton
+            title="Copy Invite Link"
+            variant="outline"
+            iconLeft="copy"
+            fullWidth
             onPress={handleCopy}
-            style={({ pressed }) => [styles.copyBtn, pressed && { opacity: 0.8 }]}
-            accessibilityRole="button"
-            accessibilityLabel="Copy invite link">
-            <Text style={styles.copyBtnText}>🔗 Copy Invite Link to Challenge Friends</Text>
-          </Pressable>
-        </View>
+            style={styles.shareCardBtn}
+          />
+        </DDCard>
       </ScrollView>
 
       {/* Floating Bottom CTA */}
-      <View style={[styles.bottomBar, { paddingBottom: insets.bottom + DD.s4 }]}>
+      <View style={[styles.bottomBar, { paddingBottom: insets.bottom + DD_SPACING.sm }]}>
         {alreadyJoined ? (
-          <Pressable
+          <DDButton
+            title="You're in this dare! View Challenge →"
+            variant="secondary"
+            iconRight="arrow-right"
+            fullWidth
             onPress={() => router.push(`/challenge/${challenge.id}`)}
-            style={({ pressed }) => [
-              styles.ctaButton,
-              styles.ctaJoined,
-              pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="View challenge details">
-            <Text style={styles.ctaJoinedText}>{"✓ You're in this dare! View Challenge →"}</Text>
-          </Pressable>
+          />
         ) : (
-          <Pressable
-            onPress={handleAccept}
+          <DDButton
+            title="Accept Dare & Join"
+            variant="primary"
+            iconLeft="check"
+            fullWidth
+            loading={isJoining}
             disabled={isJoining}
-            style={({ pressed }) => [
-              styles.ctaButton,
-              { backgroundColor: catColor },
-              pressed && !isJoining && { opacity: 0.88, transform: [{ scale: 0.98 }] },
-              isJoining && { opacity: 0.7 },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="Accept dare and join">
-            {isJoining ? (
-              <ActivityIndicator color={DD.bg} size="small" />
-            ) : (
-              <Text style={styles.ctaButtonText}>⚔️ Accept Dare & Join</Text>
-            )}
-          </Pressable>
+            onPress={handleAccept}
+          />
         )}
       </View>
     </View>
@@ -335,324 +490,301 @@ export default function InviteScreen() {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: DD.bg,
+    backgroundColor: DD_COLORS.bg,
   },
-  center: {
+  centerContainer: {
     justifyContent: 'center',
     alignItems: 'center',
-    padding: DD.s5,
+    padding: DD_SPACING.lg,
+  },
+  loadingCard: {
+    alignItems: 'center',
+    padding: DD_SPACING.xl,
   },
   loadingTitle: {
-    color: DD.text,
-    fontSize: 18,
-    fontWeight: '800',
-    marginTop: DD.s4,
+    marginTop: DD_SPACING.md,
+    marginBottom: DD_SPACING.xs,
   },
-  loadingSubtitle: {
-    color: DD.textSub,
-    fontSize: 13,
-    marginTop: DD.s1,
+  errorCard: {
+    width: '100%',
+    maxWidth: 380,
+    alignItems: 'center',
   },
-  errorIcon: {
-    fontSize: 52,
-    marginBottom: DD.s3,
+  errorIconContainer: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(255, 107, 53, 0.12)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: DD_SPACING.md,
   },
   errorTitle: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: DD.text,
-    textAlign: 'center',
+    marginBottom: DD_SPACING.xs,
   },
   errorSubtitle: {
-    fontSize: 14,
-    color: DD.textSub,
-    textAlign: 'center',
-    marginTop: DD.s2,
+    marginBottom: DD_SPACING.lg,
     lineHeight: 20,
-    maxWidth: 300,
   },
-  exploreBtn: {
-    marginTop: DD.s6,
-    backgroundColor: DD.lime,
-    paddingVertical: DD.s3,
-    paddingHorizontal: DD.s6,
-    borderRadius: DD.radiusPill,
+  errorCta: {
+    marginTop: DD_SPACING.xs,
   },
-  exploreBtnText: {
-    color: DD.bg,
-    fontWeight: '900',
-    fontSize: 15,
-  },
-  toast: {
+  toastContainer: {
     position: 'absolute',
     alignSelf: 'center',
     zIndex: 999,
-    backgroundColor: DD.bgCard,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: DD_COLORS.bgCard,
     borderWidth: 1.5,
-    borderColor: DD.lime,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s4,
-    borderRadius: DD.radiusPill,
-    shadowColor: DD.lime,
+    borderColor: DD_COLORS.lime,
+    paddingVertical: DD_SPACING.xs,
+    paddingHorizontal: DD_SPACING.md,
+    borderRadius: DD_RADII.pill,
+    shadowColor: DD_COLORS.lime,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.35,
     shadowRadius: 10,
     elevation: 8,
+    gap: DD_SPACING.xs,
   },
   toastText: {
-    color: DD.lime,
-    fontSize: 13,
-    fontWeight: '800',
+    letterSpacing: 0.2,
   },
   navBar: {
-    paddingHorizontal: DD.s5,
-    paddingBottom: DD.s3,
+    paddingHorizontal: DD_SPACING.md,
+    paddingBottom: DD_SPACING.xs,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: DD.bg,
+    backgroundColor: DD_COLORS.bg,
     borderBottomWidth: 1,
-    borderBottomColor: DD.border,
+    borderBottomColor: DD_COLORS.borderSubtle,
     zIndex: 10,
   },
-  navBtn: {
-    backgroundColor: DD.bgCard,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
-    borderWidth: 1,
-    borderColor: DD.border,
-  },
-  navBtnText: {
-    fontSize: 13,
+  navHeaderTitle: {
+    fontSize: 16,
     fontWeight: '700',
-    color: DD.text,
+  },
+  navIconButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: DD_COLORS.bgElement,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   navRight: {
     flexDirection: 'row',
-    gap: DD.s2,
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
   },
   scroll: {
     flex: 1,
   },
   content: {
-    paddingTop: DD.s5,
-    paddingHorizontal: DD.s5,
+    paddingTop: DD_SPACING.md,
+    paddingHorizontal: DD_SPACING.md,
   },
   inviteBanner: {
-    marginBottom: DD.s5,
-  },
-  bannerBadge: {
-    fontSize: 11,
-    fontWeight: '900',
-    letterSpacing: 2,
-    color: DD.lime,
-    marginBottom: DD.s1,
+    marginBottom: DD_SPACING.md,
+    gap: DD_SPACING.xs,
   },
   bannerHeadline: {
-    fontSize: 32,
-    fontWeight: '900',
-    color: DD.text,
-    letterSpacing: -1,
-    lineHeight: 38,
+    letterSpacing: -0.8,
+    marginTop: DD_SPACING.xs,
   },
-  bannerSubtitle: {
-    fontSize: 15,
-    color: DD.textSub,
-    marginTop: DD.s1,
-    lineHeight: 22,
+  bannerSubtitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
   },
-  bannerCreator: {
-    color: DD.text,
-    fontWeight: '800',
+  bannerSubtitleText: {
+    flex: 1,
+    lineHeight: 20,
   },
-  card: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusLg,
-    borderWidth: 1.5,
-    padding: DD.s5,
-    marginBottom: DD.s5,
+  heroCard: {
+    marginBottom: DD_SPACING.md,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  heroAccentBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 3,
+  },
+  heroBadgesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.xs,
+    marginBottom: DD_SPACING.sm,
   },
   categoryPill: {
-    alignSelf: 'flex-start',
-    paddingVertical: DD.s1,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
-    marginBottom: DD.s3,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 3,
+    paddingHorizontal: DD_SPACING.sm,
+    borderRadius: DD_RADII.pill,
+    gap: 5,
   },
-  categoryText: {
-    fontSize: 12,
+  categoryPillText: {
     fontWeight: '800',
+    fontSize: 12,
+  },
+  typePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 3,
+    paddingHorizontal: DD_SPACING.sm,
+    borderRadius: DD_RADII.pill,
+    backgroundColor: DD_COLORS.bgElement,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    gap: 5,
+  },
+  typePillText: {
+    fontWeight: '700',
+    fontSize: 11,
   },
   challengeTitle: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: DD.text,
-    lineHeight: 28,
-    marginBottom: DD.s2,
+    marginBottom: DD_SPACING.xs,
+    lineHeight: 30,
   },
   challengeDesc: {
-    fontSize: 14,
-    color: DD.textSub,
     lineHeight: 22,
-    marginBottom: DD.s5,
+    marginBottom: DD_SPACING.md,
   },
-  metricRow: {
+  creatorRow: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
     alignItems: 'center',
-    backgroundColor: DD.bgElement,
-    borderRadius: DD.radiusMd,
-    paddingVertical: DD.s3,
-    paddingHorizontal: DD.s2,
-    marginBottom: DD.s4,
+    gap: DD_SPACING.sm,
+    paddingTop: DD_SPACING.sm,
+    borderTopWidth: 1,
+    borderTopColor: DD_COLORS.borderSubtle,
   },
-  metricItem: {
-    alignItems: 'center',
+  creatorMeta: {
+    gap: 1,
+  },
+  statsGrid: {
+    flexDirection: 'row',
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.md,
+  },
+  statBox: {
     flex: 1,
+    alignItems: 'center',
   },
-  metricDivider: {
-    width: 1,
-    height: 28,
-    backgroundColor: DD.border,
+  statIconBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 4,
   },
-  metricIcon: {
-    fontSize: 18,
+  statValue: {
     marginBottom: 2,
   },
-  metricValue: {
-    fontSize: 16,
-    fontWeight: '900',
-    color: DD.text,
+  statLabel: {
+    fontSize: 11,
   },
-  metricLabel: {
-    fontSize: 10,
-    fontWeight: '600',
-    color: DD.textMuted,
-    marginTop: 2,
+  sectionCard: {
+    marginBottom: DD_SPACING.md,
   },
-  progressContainer: {
-    gap: DD.s2,
-  },
-  progressHeader: {
+  timelineHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: DD_SPACING.sm,
   },
-  progressLabel: {
-    fontSize: 12,
-    color: DD.textMuted,
-    fontWeight: '600',
+  timelineHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.xs,
   },
-  progressPct: {
-    fontSize: 13,
+  timelineTitle: {
+    fontSize: 15,
+  },
+  progressPctText: {
     fontWeight: '800',
+    fontSize: 15,
   },
-  progressBar: {
+  progressTrack: {
     height: 8,
-    backgroundColor: DD.bg,
+    backgroundColor: DD_COLORS.bgElement,
     borderRadius: 4,
     overflow: 'hidden',
+    marginBottom: DD_SPACING.xs,
   },
   progressFill: {
     height: '100%',
     borderRadius: 4,
   },
-  progressSubtext: {
-    fontSize: 11,
-    color: DD.textMuted,
+  timelineFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
-  rulesCard: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusLg,
-    borderWidth: 1,
-    borderColor: DD.border,
-    padding: DD.s4,
-    marginBottom: DD.s5,
-    gap: DD.s3,
+  rulesHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.xs,
+    marginBottom: DD_SPACING.md,
   },
   rulesTitle: {
     fontSize: 15,
-    fontWeight: '800',
-    color: DD.text,
-    marginBottom: DD.s1,
   },
   ruleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s3,
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.sm,
   },
-  ruleBullet: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+  ruleNumberBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: DD_COLORS.bgElement,
+    borderWidth: 1,
+    borderColor: 'rgba(191, 253, 64, 0.3)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  ruleBulletText: {
-    color: DD.bg,
-    fontSize: 11,
-    fontWeight: '900',
-  },
   ruleContent: {
     flex: 1,
-    fontSize: 13,
-    color: DD.textSub,
     lineHeight: 18,
+    fontSize: 13,
   },
-  shareSection: {
+  shareCard: {
+    marginBottom: DD_SPACING.lg,
+  },
+  shareCardHeader: {
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.md,
   },
-  copyBtn: {
-    backgroundColor: DD.bgCard,
-    borderWidth: 1,
-    borderColor: DD.border,
-    paddingVertical: DD.s3,
-    paddingHorizontal: DD.s4,
-    borderRadius: DD.radiusPill,
+  shareCardMeta: {
+    flex: 1,
+    gap: 2,
   },
-  copyBtnText: {
-    color: DD.lime,
-    fontSize: 12,
-    fontWeight: '700',
+  shareCardBtn: {
+    marginTop: DD_SPACING.xs,
   },
   bottomBar: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: DD.bg + 'F2',
-    paddingHorizontal: DD.s5,
-    paddingTop: DD.s3,
+    backgroundColor: 'rgba(10, 10, 16, 0.94)',
+    paddingHorizontal: DD_SPACING.md,
+    paddingTop: DD_SPACING.xs,
     borderTopWidth: 1,
-    borderTopColor: DD.border,
-  },
-  ctaButton: {
-    borderRadius: DD.radiusPill,
-    paddingVertical: DD.s4,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: DD.lime,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 6,
-  },
-  ctaButtonText: {
-    fontSize: 16,
-    fontWeight: '900',
-    color: DD.bg,
-    letterSpacing: 0.3,
-  },
-  ctaJoined: {
-    backgroundColor: DD.lime + '22',
-    borderWidth: 1.5,
-    borderColor: DD.lime,
-    shadowOpacity: 0,
-  },
-  ctaJoinedText: {
-    fontSize: 15,
-    fontWeight: '900',
-    color: DD.lime,
+    borderTopColor: DD_COLORS.borderSubtle,
   },
 });
