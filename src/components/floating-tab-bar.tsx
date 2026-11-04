@@ -38,9 +38,6 @@ export function FloatingTabBar({ state, navigation }: FloatingTabBarProps) {
   const isHomeActive = currentRouteName === 'index';
   const showHomeFill = isHomeActive || focusedRoute === 'index';
 
-  const isDiscoverActive = currentRouteName === 'discover';
-  const showDiscoverFill = isDiscoverActive || focusedRoute === 'discover';
-
   const isCreateActive = currentRouteName === 'create';
   const showCreateActive = isCreateActive || focusedRoute === 'create';
 
@@ -97,33 +94,7 @@ export function FloatingTabBar({ state, navigation }: FloatingTabBarProps) {
           </DDText>
         </Pressable>
 
-        {/* 2. Discover Tab */}
-        <Pressable
-          onPress={() => navigateTab('discover')}
-          onFocus={() => setFocusedRoute('discover')}
-          onBlur={() => setFocusedRoute((prev) => (prev === 'discover' ? null : prev))}
-          android_ripple={{ color: 'rgba(191, 253, 64, 0.12)', borderless: true, radius: 28 }}
-          style={({ pressed }) => [styles.tabItem, pressed && styles.tabItemPressed]}
-          accessibilityRole="tab"
-          accessibilityLabel="Discover challenges"
-          accessibilityState={{ selected: isDiscoverActive }}>
-          <View style={styles.iconPill}>
-            <DDIcon
-              name="discover"
-              size={22}
-              color={showDiscoverFill ? DD_COLORS.lime : DD_COLORS.textMuted}
-              weight={showDiscoverFill ? 'fill' : 'regular'}
-            />
-          </View>
-          <DDText
-            variant="caption"
-            color={showDiscoverFill ? 'lime' : 'muted'}
-            style={[styles.tabLabel, showDiscoverFill && styles.tabLabelActive]}>
-            Discover
-          </DDText>
-        </Pressable>
-
-        {/* 3. Center Create Action (Hero Circular Button) */}
+        {/* 2. Center Create Action (Hero Circular Button) */}
         <View style={styles.centerActionWrapper} pointerEvents="box-none">
           <Pressable
             onPress={() => navigateTab('create')}
@@ -280,7 +251,8 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   centerActionWrapper: {
-    width: 60,
+    flex: 1,
+    height: '100%',
     alignItems: 'center',
     justifyContent: 'center',
   },

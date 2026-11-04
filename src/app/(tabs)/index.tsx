@@ -524,26 +524,25 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* F. Categories & Trending Challenges */}
+        {/* F. Categories & User Dares */}
         <View style={styles.sectionContainer}>
           <View style={styles.sectionHeaderRow}>
             <View style={styles.sectionTitleGroup}>
               <DDIcon name="flame" size={20} color={DD_COLORS.lime} weight="fill" />
               <DDText variant="h3" color="primary" style={styles.sectionTitle}>
-                Explore Challenges
+                Your Dares
               </DDText>
             </View>
 
             <Pressable
-              onPress={() => router.push('/discover')}
+              onPress={() => router.push('/create')}
               hitSlop={8}
               style={styles.browseAllButton}
               accessibilityRole="button"
-              accessibilityLabel="Browse all challenges in Discover">
+              accessibilityLabel="Create a new dare">
               <DDText variant="caption" color="lime" bold>
-                View all
+                + New Dare
               </DDText>
-              <DDIcon name="arrow-right" size={13} color={DD_COLORS.lime} weight="bold" />
             </Pressable>
           </View>
 

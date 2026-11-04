@@ -51,7 +51,7 @@ interface EventBadgeConfig {
  */
 export default function NotificationsScreen() {
   const insets = useSafeAreaInsets();
-  const { refreshUnreadNotificationsCount, decrementUnreadCount } = useChallenges();
+  const { refreshUnreadNotificationsCount, decrementUnreadCount, isUserJoined } = useChallenges();
   const { isGuest, showAuthModal } = useAuth();
   const toast = useToast();
 
@@ -125,8 +125,12 @@ export default function NotificationsScreen() {
 
     const route = getNotificationRoute(item);
     if (route) {
+      let targetRoute = route;
+      if (item.challengeId && targetRoute.startsWith('/challenge/') && !isUserJoined(item.challengeId)) {
+        targetRoute = `/invite/${item.challengeId}`;
+      }
       try {
-        router.push(route as any);
+        router.push(targetRoute as any);
       } catch (navErr) {
         console.warn('[DareDrop Notifications] Navigation error:', navErr);
       }
