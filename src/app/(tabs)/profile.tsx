@@ -99,9 +99,14 @@ export default function ProfileScreen() {
   const [notifStatus, setNotifStatus] = useState<NotificationPermissionStatus | 'checking'>('checking');
   const [isRegisteringNotif, setIsRegisteringNotif] = useState(false);
 
+  // Segmented dare selection tab: 'created' | 'joined'
+  const [selectedDareTab, setSelectedDareTab] = useState<'created' | 'joined'>('created');
+
   // Joined and Created challenges
-  const joined = useMemo(() => challenges.filter((c) => c.joined), [challenges]);
-  const created = useMemo(() => challenges.filter((c) => c.creator === 'You'), [challenges]);
+  const joined = useMemo(() => challenges.filter((c) => Boolean(c.joined)), [challenges]);
+  const created = useMemo(() => {
+    return challenges.filter((c) => Boolean(currentUserId != null && c.creatorId === currentUserId));
+  }, [challenges, currentUserId]);
 
   // Category commitments
   const categoryCounts = useMemo(() => {
@@ -738,22 +743,124 @@ export default function ProfileScreen() {
         )}
 
         {/* ================================================================ */}
-        {/* ACTIVE CHALLENGES FEED                                           */}
+        {/* DARE SELECTION TABS (Created by You vs Joined by You)            */}
         {/* ================================================================ */}
         <View style={styles.challengesSection}>
           <View style={styles.sectionHeader}>
             <DDText variant="label" color="muted" style={styles.sectionLabel}>
-              ACTIVE CHALLENGES ({joined.length})
+              MY DARES
             </DDText>
           </View>
 
-          {joined.length === 0 ? (
+          {/* Segmented Pill Tabs */}
+          <View style={styles.segmentedDock} accessibilityRole="tablist">
+            <Pressable
+              onPress={() => setSelectedDareTab('created')}
+              android_ripple={{ color: 'rgba(191, 253, 64, 0.15)' }}
+              style={({ pressed }) => [
+                styles.segmentTab,
+                selectedDareTab === 'created' && styles.segmentTabActive,
+                pressed && styles.segmentTabPressed,
+              ]}
+              accessibilityRole="tab"
+              accessibilityLabel={`Created by You, ${created.length} challenges`}
+              accessibilityState={{ selected: selectedDareTab === 'created' }}>
+              <DDIcon
+                name="plus"
+                size={16}
+                color={selectedDareTab === 'created' ? DD_COLORS.textInverse : DD_COLORS.textMuted}
+                weight="bold"
+              />
+              <DDText
+                variant="buttonSm"
+                color={selectedDareTab === 'created' ? 'inverse' : 'muted'}
+                style={[styles.segmentLabel, selectedDareTab === 'created' && styles.segmentLabelActive]}>
+                Created by You
+              </DDText>
+              <View style={[styles.segmentBadge, selectedDareTab === 'created' && styles.segmentBadgeActive]}>
+                <DDText
+                  variant="caption"
+                  style={[styles.segmentBadgeText, selectedDareTab === 'created' && styles.segmentBadgeTextActive]}>
+                  {String(created.length)}
+                </DDText>
+              </View>
+            </Pressable>
+
+            <Pressable
+              onPress={() => setSelectedDareTab('joined')}
+              android_ripple={{ color: 'rgba(191, 253, 64, 0.15)' }}
+              style={({ pressed }) => [
+                styles.segmentTab,
+                selectedDareTab === 'joined' && styles.segmentTabActive,
+                pressed && styles.segmentTabPressed,
+              ]}
+              accessibilityRole="tab"
+              accessibilityLabel={`Joined by You, ${joined.length} challenges`}
+              accessibilityState={{ selected: selectedDareTab === 'joined' }}>
+              <DDIcon
+                name="target"
+                size={16}
+                color={selectedDareTab === 'joined' ? DD_COLORS.textInverse : DD_COLORS.textMuted}
+                weight="bold"
+              />
+              <DDText
+                variant="buttonSm"
+                color={selectedDareTab === 'joined' ? 'inverse' : 'muted'}
+                style={[styles.segmentLabel, selectedDareTab === 'joined' && styles.segmentLabelActive]}>
+                Joined by You
+              </DDText>
+              <View style={[styles.segmentBadge, selectedDareTab === 'joined' && styles.segmentBadgeActive]}>
+                <DDText
+                  variant="caption"
+                  style={[styles.segmentBadgeText, selectedDareTab === 'joined' && styles.segmentBadgeTextActive]}>
+                  {String(joined.length)}
+                </DDText>
+              </View>
+            </Pressable>
+          </View>
+
+          {/* Dare List / Empty State */}
+          {selectedDareTab === 'created' ? (
+            created.length === 0 ? (
+              <DDCard variant="element" padding="lg" style={styles.emptyCard}>
+                <View style={styles.emptyIconCircle}>
+                  <DDIcon name="plus" size={26} color={DD_COLORS.lime} weight="bold" />
+                </View>
+                <DDText variant="h3" color="primary" style={styles.emptyTitle}>
+                  No created dares
+                </DDText>
+                <DDText variant="bodySm" color="secondary" style={styles.emptyDescription}>
+                  You have not created any challenges yet. Spark a dare and challenge your friends to join!
+                </DDText>
+                <DDButton
+                  variant="primary"
+                  title="Create a Dare"
+                  iconRight="arrow-right"
+                  onPress={() => router.push('/(tabs)/create')}
+                  style={styles.emptyButton}
+                />
+              </DDCard>
+            ) : (
+              created.map((c) => (
+                <ChallengeCard
+                  key={c.id}
+                  challenge={c}
+                  onPress={() =>
+                    router.push({
+                      pathname: '/challenge/[id]',
+                      params: { id: c.id },
+                    })
+                  }
+                />
+              ))
+            )
+          ) : joined.length === 0 ? (
             <DDCard variant="element" padding="lg" style={styles.emptyCard}>
               <View style={styles.emptyIconCircle}>
                 <DDIcon name="target" size={26} color={DD_COLORS.textMuted} weight="bold" />
               </View>
               <DDText variant="h3" color="primary" style={styles.emptyTitle}>
-                No active dares
+                No joined dares
               </DDText>
               <DDText variant="bodySm" color="secondary" style={styles.emptyDescription}>
                 You have not joined any challenges yet. Browse Discover to take on your first dare!
@@ -781,32 +888,6 @@ export default function ProfileScreen() {
             ))
           )}
         </View>
-
-        {/* ================================================================ */}
-        {/* CREATED CHALLENGES FEED                                          */}
-        {/* ================================================================ */}
-        {created.length > 0 && (
-          <View style={styles.challengesSection}>
-            <View style={styles.sectionHeader}>
-              <DDText variant="label" color="muted" style={styles.sectionLabel}>
-                CREATED BY ME ({created.length})
-              </DDText>
-            </View>
-
-            {created.map((c) => (
-              <ChallengeCard
-                key={c.id}
-                challenge={c}
-                onPress={() =>
-                  router.push({
-                    pathname: '/challenge/[id]',
-                    params: { id: c.id },
-                  })
-                }
-              />
-            ))}
-          </View>
-        )}
 
         {/* ================================================================ */}
         {/* ACCOUNT & SECURITY SESSION MANAGEMENT                            */}
@@ -1260,6 +1341,58 @@ const styles = StyleSheet.create({
   },
   challengesSection: {
     gap: DD_SPACING.sm,
+  },
+  segmentedDock: {
+    flexDirection: 'row',
+    backgroundColor: DD_COLORS.bgElement,
+    borderRadius: DD_RADII.pill,
+    padding: 4,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    marginBottom: DD_SPACING.xs,
+  },
+  segmentTab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: DD_SPACING.sm,
+    borderRadius: DD_RADII.pill,
+    minHeight: 42,
+  },
+  segmentTabActive: {
+    backgroundColor: DD_COLORS.lime,
+  },
+  segmentTabPressed: {
+    opacity: 0.8,
+  },
+  segmentLabel: {
+    fontWeight: '700',
+  },
+  segmentLabelActive: {
+    fontWeight: '900',
+  },
+  segmentBadge: {
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: DD_RADII.pill,
+    minWidth: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  segmentBadgeActive: {
+    backgroundColor: 'rgba(10, 10, 16, 0.2)',
+  },
+  segmentBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: DD_COLORS.textMuted,
+  },
+  segmentBadgeTextActive: {
+    color: DD_COLORS.textInverse,
   },
   emptyCard: {
     alignItems: 'center',

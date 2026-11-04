@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
-import { Category, Challenge, MOCK_CHALLENGES } from '@/data/challenges';
+import { Category, Challenge, MOCK_CHALLENGES, ProofConfig, ProofMethod } from '@/data/challenges';
 import { buildCompletionsChannelName, subscribeToCompletions } from '@/lib/realtime';
 import {
   buildPendingReviews,
@@ -15,6 +15,7 @@ import {
 import {
   DbChallenge,
   DbCompletion,
+  DbProofChallenge,
   EligibleVerifier,
   ensureAuthenticatedUser,
   getOrCreateCurrentUserId,
@@ -31,6 +32,21 @@ const getJoinedKey = (uid?: string | null) =>
 const getCompletionsKey = (uid?: string | null) =>
   `@daredrop/local_completions_v1:${uid && uid.trim() ? uid.trim() : 'guest'}`;
 
+/**
+ * Normalizes backend RPC error messages by safely stripping database/driver prefixes
+ * (such as "error: " or "PostgrestError: ") while strictly preserving the meaningful
+ * backend error content and SQLSTATE messages.
+ */
+function normalizeRpcErrorMessage(rawMessage: string | null | undefined, fallback: string): string {
+  if (!rawMessage || typeof rawMessage !== 'string') return fallback;
+  const cleaned = rawMessage
+    .trim()
+    .replace(/^(?:error|postgre(?:s|st)error)\s*:\s*/i, '')
+    .replace(/^"|"$/g, '')
+    .trim();
+  return cleaned || fallback;
+}
+
 export interface CreateChallengeInput {
   title: string;
   description: string;
@@ -40,6 +56,8 @@ export interface CreateChallengeInput {
   creator?: string;
   challengeType?: 'daily' | 'one_time';
   timezone?: string;
+  proofMethod?: ProofMethod;
+  proofConfig?: ProofConfig;
 }
 
 interface ChallengesContextType {
@@ -55,11 +73,26 @@ interface ChallengesContextType {
   joinChallenge: (id: string) => Promise<{ success: boolean; joined: boolean; error?: string }>;
   fetchChallengeById: (id: string) => Promise<Challenge | null>;
   isUserJoined: (id: string) => boolean;
+  generateProofChallenge: (params: {
+    challengeId: string;
+    verifierId: string;
+    completionDate: string;
+  }) => Promise<{
+    success: boolean;
+    error?: string;
+    proofChallenge?: DbProofChallenge;
+    isFutureDate?: boolean;
+    serverDate?: string;
+  }>;
+  cancelProofChallenge: (proofChallengeId: string) => Promise<{ success: boolean; error?: string }>;
   submitCompletion: (params: {
     challengeId: string;
     verifierId: string;
     completionDate: string;
+    proofChallengeId: string | null;
     submissionNote?: string;
+    numericValue?: number | null;
+    textEntry?: string | null;
   }) => Promise<{ success: boolean; error?: string; completion?: DbCompletion }>;
   fetchCompletions: (challengeId: string) => Promise<DbCompletion[]>;
   fetchEligibleVerifiers: (challengeId: string) => Promise<EligibleVerifier[]>;
@@ -119,6 +152,8 @@ function dbToAppChallenge(
     joined: isJoined,
     challengeType: db.challenge_type || 'daily',
     timezone: db.timezone || 'UTC',
+    proofMethod: db.proof_method || 'physical_action',
+    proofConfig: db.proof_config && typeof db.proof_config === 'object' ? db.proof_config : {},
   };
 }
 
@@ -526,6 +561,8 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
             creator_name: input.creator || 'You',
             challenge_type: input.challengeType || 'daily',
             timezone: input.timezone || 'UTC',
+            proof_method: input.proofMethod || 'physical_action',
+            proof_config: input.proofConfig || {},
           } as any)
           .select()
           .single();
@@ -589,6 +626,8 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
         joined: true,
         challengeType: input.challengeType || 'daily',
         timezone: input.timezone || 'UTC',
+        proofMethod: input.proofMethod || 'physical_action',
+        proofConfig: input.proofConfig || {},
       };
 
       setChallenges((prev) => {
@@ -776,77 +815,186 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
     [joinedIds],
   );
 
+  const generateProofChallenge = useCallback(
+    async (params: {
+      challengeId: string;
+      verifierId: string;
+      completionDate: string;
+    }): Promise<{
+      success: boolean;
+      error?: string;
+      proofChallenge?: DbProofChallenge;
+      isFutureDate?: boolean;
+      serverDate?: string;
+    }> => {
+      if (!isSupabaseConfigured || !supabase) {
+        return {
+          success: false,
+          error: 'An active connection to DareDrop is required to generate proof challenges. Offline generation is not supported.',
+        };
+      }
+
+      if (!params.challengeId || !params.verifierId || !params.completionDate) {
+        return {
+          success: false,
+          error: 'Challenge, verifier, and completion date are required to generate a proof challenge.',
+        };
+      }
+
+      try {
+        await ensureAuthenticatedUser();
+        const { data, error: rpcErr } = await supabase.rpc('generate_proof_challenge', {
+          p_challenge_id: params.challengeId,
+          p_verifier_id: params.verifierId,
+          p_completion_date: params.completionDate,
+        });
+
+        if (rpcErr) {
+          let userMsg = rpcErr.message;
+          const isFutureDate =
+            rpcErr.message.includes('Cannot generate proof for a future date') ||
+            rpcErr.message.includes('future date');
+
+          let serverDate: string | undefined;
+          if (isFutureDate) {
+            const match = rpcErr.message.match(/current challenge date is (\d{4}-\d{2}-\d{2})/);
+            if (match) {
+              serverDate = match[1];
+            }
+            userMsg = serverDate
+              ? `Your device clock is ahead of the challenge timezone. The current challenge date is ${serverDate}.`
+              : 'Your device clock is ahead of the challenge timezone. Please verify your device date and time.';
+          } else if (rpcErr.code === '42900' || rpcErr.message.includes('Rate limit')) {
+            userMsg = 'Rate limit reached: maximum 5 proof challenges per hour. Please wait before generating another.';
+          } else if (rpcErr.code === '42501' || rpcErr.message.includes('registered')) {
+            userMsg = 'Only registered DareDrop accounts can generate proof challenges.';
+          } else if (rpcErr.code === '22023') {
+            userMsg = normalizeRpcErrorMessage(rpcErr.message, 'Invalid challenge parameters.');
+          }
+          return { success: false, error: userMsg, isFutureDate, serverDate };
+        }
+
+        return { success: true, proofChallenge: data as DbProofChallenge };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err?.message || 'Failed to generate proof challenge. Please check your connection.',
+        };
+      }
+    },
+    [],
+  );
+
+  const cancelProofChallenge = useCallback(
+    async (proofChallengeId: string): Promise<{ success: boolean; error?: string }> => {
+      if (!isSupabaseConfigured || !supabase) {
+        return {
+          success: false,
+          error: 'Backend is not configured or offline.',
+        };
+      }
+
+      if (!proofChallengeId || !proofChallengeId.trim()) {
+        return {
+          success: false,
+          error: 'Proof challenge ID is required for cancellation.',
+        };
+      }
+
+      try {
+        await ensureAuthenticatedUser();
+        const { error: rpcErr } = await supabase.rpc('cancel_proof_challenge', {
+          p_proof_challenge_id: proofChallengeId.trim(),
+        });
+
+        if (rpcErr) {
+          return { success: false, error: rpcErr.message };
+        }
+
+        return { success: true };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err?.message || 'Failed to cancel proof challenge.',
+        };
+      }
+    },
+    [],
+  );
+
   const submitCompletion = useCallback(
     async (params: {
       challengeId: string;
       verifierId: string;
       completionDate: string;
+      proofChallengeId: string | null;
       submissionNote?: string;
+      numericValue?: number | null;
+      textEntry?: string | null;
     }): Promise<{ success: boolean; error?: string; completion?: DbCompletion }> => {
-      if (isSupabaseConfigured && supabase) {
-        try {
-          await ensureAuthenticatedUser();
-          const { data, error: rpcErr } = await supabase.rpc('submit_challenge_completion', {
-            p_challenge_id: params.challengeId,
-            p_verifier_id: params.verifierId,
-            p_completion_date: params.completionDate,
-            p_submission_note: params.submissionNote?.trim() || null,
-          });
-
-          if (rpcErr) {
-            let userMsg = rpcErr.message;
-            if (rpcErr.code === '23505' || rpcErr.message.includes('already')) {
-              if (rpcErr.message.includes('pending')) {
-                userMsg = 'A submission for this date/dare is already pending verification.';
-              } else if (rpcErr.message.includes('approved')) {
-                userMsg = 'This completion date/dare has already been approved!';
-              } else {
-                userMsg = 'A submission already exists for this challenge date.';
-              }
-            } else if (rpcErr.code === '42501') {
-              userMsg = 'You must be an active participant to submit proof.';
-            } else if (rpcErr.code === '22023') {
-              userMsg = rpcErr.message;
-            }
-            return { success: false, error: userMsg };
-          }
-
-          return { success: true, completion: data as DbCompletion };
-        } catch (err: any) {
-          return { success: false, error: err?.message || 'Failed to submit challenge completion' };
-        }
+      if (!isSupabaseConfigured || !supabase) {
+        return {
+          success: false,
+          error: 'An active connection to DareDrop is required to submit a verified completion. Offline submissions are not accepted.',
+        };
       }
-
-      // Offline / Local mock fallback
-      const targetChallenge = challengesRef.current.find((c) => c.id === params.challengeId);
-      const derivedChallengeType: 'daily' | 'one_time' =
-        targetChallenge?.challengeType === 'one_time' ? 'one_time' : 'daily';
-
-      const offlineCompletion: DbCompletion = {
-        id: 'local_comp_' + Date.now().toString(36),
-        challenge_id: params.challengeId,
-        challenge_type: derivedChallengeType,
-        participant_id: currentUserIdRef.current || 'local_user',
-        verifier_id: params.verifierId,
-        completion_date: params.completionDate,
-        status: 'pending',
-        submission_note: params.submissionNote?.trim() || null,
-        rejection_reason: null,
-        submitted_at: new Date().toISOString(),
-        reviewed_at: null,
-      };
 
       try {
-        const userCompKey = getCompletionsKey(currentUserIdRef.current);
-        const stored = await AsyncStorage.getItem(userCompKey);
-        const list: DbCompletion[] = stored ? JSON.parse(stored) : [];
-        list.unshift(offlineCompletion);
-        await AsyncStorage.setItem(userCompKey, JSON.stringify(list));
-      } catch {
-        // Ignore local storage error
-      }
+        await ensureAuthenticatedUser();
+        const { data, error: rpcErr } = await supabase.rpc('submit_challenge_completion', {
+          p_challenge_id: params.challengeId,
+          p_verifier_id: params.verifierId,
+          p_completion_date: params.completionDate,
+          p_proof_challenge_id: params.proofChallengeId,
+          p_submission_note: params.submissionNote?.trim() || null,
+          p_numeric_value:
+            params.numericValue !== undefined && params.numericValue !== null
+              ? Number(params.numericValue)
+              : null,
+          p_text_entry: params.textEntry?.trim() || null,
+        });
 
-      return { success: true, completion: offlineCompletion };
+        if (rpcErr) {
+          const rawMsg = rpcErr.message || '';
+          let userMsg = normalizeRpcErrorMessage(rawMsg, 'Failed to submit challenge completion.');
+
+          // Differentiate dynamic proof challenge expiration from date/grace-period window expiration
+          const isProofExpired =
+            rawMsg.includes('Proof challenge has expired') ||
+            (rawMsg.toLowerCase().includes('proof') && rawMsg.toLowerCase().includes('expired'));
+
+          if (isProofExpired) {
+            userMsg = 'This proof challenge has expired. Please generate a new one before submitting.';
+          } else if (rawMsg.includes('consumed')) {
+            userMsg = 'This proof challenge has already been used. Please generate a fresh one.';
+          } else if (rawMsg.includes('cancelled') || rawMsg.includes('superseded')) {
+            userMsg = 'This proof challenge has been cancelled. Please generate a new one.';
+          } else if (rawMsg.includes('below minimum allowed') || rawMsg.includes('exceeds maximum allowed')) {
+            userMsg = normalizeRpcErrorMessage(rawMsg, 'Submitted value is out of the allowed range.');
+          } else if (rawMsg.includes('at least 5 characters')) {
+            userMsg = 'A written log entry of at least 5 characters is required.';
+          } else if (rawMsg.includes('cannot exceed 500 characters')) {
+            userMsg = 'Written log entry cannot exceed 500 characters.';
+          } else if (rpcErr.code === '23505' || (rawMsg.includes('already') && !rawMsg.includes('consumed'))) {
+            if (rawMsg.includes('pending')) {
+              userMsg = 'A submission for this date/dare is already pending verification.';
+            } else if (rawMsg.includes('approved')) {
+              userMsg = 'This completion date/dare has already been approved!';
+            } else {
+              userMsg = 'A submission already exists for this challenge date.';
+            }
+          } else if (rpcErr.code === '42501') {
+            userMsg = 'You must be an active participant to submit proof.';
+          } else if (rpcErr.code === '22023') {
+            userMsg = normalizeRpcErrorMessage(rawMsg, 'Invalid submission parameters.');
+          }
+          return { success: false, error: userMsg };
+        }
+
+        return { success: true, completion: data as DbCompletion };
+      } catch (err: any) {
+        return { success: false, error: err?.message || 'Failed to submit challenge completion' };
+      }
     },
     [],
   );
@@ -1191,6 +1339,8 @@ export function ChallengesProvider({ children }: { children: React.ReactNode }) 
         joinChallenge,
         fetchChallengeById,
         isUserJoined,
+        generateProofChallenge,
+        cancelProofChallenge,
         submitCompletion,
         fetchCompletions,
         fetchEligibleVerifiers,

@@ -2,6 +2,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
+import { Category, ProofConfig, ProofMethod } from '@/data/challenges';
+
 // Environment variables for Supabase (client-safe anon credentials only)
 const rawSupabaseUrl = (process.env.EXPO_PUBLIC_SUPABASE_URL || '')
   .trim()
@@ -25,7 +27,7 @@ export interface DbChallenge {
   id: string;
   title: string;
   description: string;
-  category: 'Fitness' | 'Focus' | 'Fun' | 'Learning';
+  category: Category;
   duration_days: number;
   ends_at: string | null;
   creator_id: string | null;
@@ -34,6 +36,8 @@ export interface DbChallenge {
   participants_count?: number;
   challenge_type?: 'daily' | 'one_time';
   timezone?: string;
+  proof_method?: ProofMethod;
+  proof_config?: ProofConfig;
 }
 
 export interface DbParticipant {
@@ -57,6 +61,32 @@ export interface DbCompletion {
   rejection_reason: string | null;
   submitted_at: string;
   reviewed_at: string | null;
+  first_submitted_at?: string;
+  last_rejection_reason?: string | null;
+  last_reviewed_at?: string | null;
+  proof_code?: string | null;
+  action_prompt_id?: string | null;
+  action_prompt?: string | null;
+  proof_challenge_id?: string | null;
+  numeric_value?: number | null;
+  text_entry?: string | null;
+}
+
+export type ProofChallengeStatus = 'active' | 'consumed' | 'cancelled' | 'expired';
+
+export interface DbProofChallenge {
+  id: string;
+  challenge_id: string;
+  participant_id: string;
+  verifier_id: string;
+  completion_date: string;
+  proof_code: string;
+  action_prompt_id: string;
+  action_prompt: string;
+  status: ProofChallengeStatus;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
 }
 
 export interface DbUserPushToken {
@@ -210,8 +240,32 @@ export interface Database {
         };
         Update: Partial<Omit<DbChallengeInvitation, 'id'>>;
       };
+      proof_challenges: {
+        Row: DbProofChallenge;
+        Insert: Omit<DbProofChallenge, 'id' | 'created_at' | 'expires_at' | 'consumed_at'> & {
+          id?: string;
+          created_at?: string;
+          expires_at?: string;
+          consumed_at?: string | null;
+        };
+        Update: Partial<Omit<DbProofChallenge, 'id'>>;
+      };
     };
     Functions: {
+      generate_proof_challenge: {
+        Args: {
+          p_challenge_id: string;
+          p_verifier_id: string;
+          p_completion_date: string;
+        };
+        Returns: DbProofChallenge;
+      };
+      cancel_proof_challenge: {
+        Args: {
+          p_proof_challenge_id: string;
+        };
+        Returns: DbProofChallenge;
+      };
       register_device_push_token: {
         Args: {
           p_expo_push_token: string;
@@ -231,7 +285,10 @@ export interface Database {
           p_challenge_id: string;
           p_verifier_id: string;
           p_completion_date: string;
+          p_proof_challenge_id: string | null;
           p_submission_note?: string | null;
+          p_numeric_value?: number | null;
+          p_text_entry?: string | null;
         };
         Returns: DbCompletion;
       };

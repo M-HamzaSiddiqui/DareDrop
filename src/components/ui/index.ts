@@ -7,3 +7,4 @@ export * from './dd-avatar';
 export * from './dd-icon';
 export * from './dd-skeleton';
 export * from './collapsible';
+export * from './dd-toast';

@@ -27,6 +27,8 @@ import { DDCard } from '@/components/ui/dd-card';
 import { DDIcon, type DDIconName } from '@/components/ui/dd-icon';
 import { DDSkeleton } from '@/components/ui/dd-skeleton';
 import { DDText } from '@/components/ui/dd-text';
+import { useToast, sanitizeUserErrorMessage } from '@/components/ui/dd-toast';
+import { useAuth } from '@/lib/auth-context';
 import { useChallenges } from '@/store/challenges-store';
 
 type TypeFilterOption = 'all' | 'daily' | 'one_time';
@@ -63,15 +65,14 @@ export default function DiscoverScreen() {
     joinChallenge,
   } = useChallenges();
 
+  const { isGuest, showAuthModal } = useAuth();
+  const toast = useToast();
+
   // Search & Filter state
   const [query, setQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<CategoryKey | 'All'>('All');
   const [selectedType, setSelectedType] = useState<TypeFilterOption>('all');
   const [joiningId, setJoiningId] = useState<string | null>(null);
-  const [feedbackMessage, setFeedbackMessage] = useState<{
-    text: string;
-    type: 'success' | 'error';
-  } | null>(null);
 
   // Clear search and dismiss keyboard
   const handleClearSearch = useCallback(() => {
@@ -87,42 +88,58 @@ export default function DiscoverScreen() {
     Keyboard.dismiss();
   }, []);
 
-  // Handle direct join action
-  const handleJoin = useCallback(
+  // Execute challenge join request
+  const executeJoin = useCallback(
     async (challenge: Challenge) => {
       if (joiningId) return;
       setJoiningId(challenge.id);
-      setFeedbackMessage(null);
 
       try {
         const res = await joinChallenge(challenge.id);
         if (res.success) {
-          setFeedbackMessage({
-            text: res.joined
+          toast.success(
+            res.joined
               ? `You joined "${challenge.title}"!`
               : `You left "${challenge.title}".`,
-            type: 'success',
-          });
+          );
         } else {
-          setFeedbackMessage({
-            text: res.error || 'Failed to update challenge membership. Please try again.',
-            type: 'error',
-          });
+          toast.error(
+            sanitizeUserErrorMessage(
+              res.error,
+              'Failed to update challenge membership. Please try again.',
+            ),
+          );
         }
       } catch (err: any) {
-        setFeedbackMessage({
-          text: err?.message || 'An unexpected error occurred while updating membership.',
-          type: 'error',
-        });
+        toast.error(
+          sanitizeUserErrorMessage(
+            err?.message,
+            'An unexpected error occurred while updating membership.',
+          ),
+        );
       } finally {
         setJoiningId(null);
-        // Clear success message automatically after 3 seconds
-        setTimeout(() => {
-          setFeedbackMessage((prev) => (prev?.type === 'success' ? null : prev));
-        }, 3000);
       }
     },
-    [joiningId, joinChallenge],
+    [joiningId, joinChallenge, toast],
+  );
+
+  // Handle direct join action with guest modal check
+  const handleJoin = useCallback(
+    (challenge: Challenge) => {
+      if (isGuest) {
+        showAuthModal({
+          title: 'Sign In to Join Dare',
+          description: 'Create an account or sign in to join challenges, ignite daily streaks, and verify proofs with friends.',
+          onSuccess: () => {
+            void executeJoin(challenge);
+          },
+        });
+        return;
+      }
+      void executeJoin(challenge);
+    },
+    [isGuest, showAuthModal, executeJoin],
   );
 
   // Filtered challenge feed
@@ -325,34 +342,6 @@ export default function DiscoverScreen() {
           </Pressable>
         </View>
 
-        {/* ================================================================ */}
-        {/* FEEDBACK BANNER (Join Toast / Error)                             */}
-        {/* ================================================================ */}
-        {feedbackMessage && (
-          <View
-            style={[
-              styles.feedbackBanner,
-              feedbackMessage.type === 'error'
-                ? styles.feedbackBannerError
-                : styles.feedbackBannerSuccess,
-            ]}>
-            <DDIcon
-              name={feedbackMessage.type === 'error' ? 'warning-circle' : 'check-circle'}
-              size={16}
-              color={feedbackMessage.type === 'error' ? DD_COLORS.danger : DD_COLORS.success}
-              weight="fill"
-            />
-            <DDText
-              variant="bodySm"
-              style={
-                feedbackMessage.type === 'error'
-                  ? styles.feedbackTextError
-                  : styles.feedbackTextSuccess
-              }>
-              {feedbackMessage.text}
-            </DDText>
-          </View>
-        )}
 
         {/* ================================================================ */}
         {/* COMMUNITY SPOTLIGHT HERO (Shown when not actively searching)     */}
@@ -781,34 +770,6 @@ const styles = StyleSheet.create({
   overlineText: {
     letterSpacing: 1.2,
     textTransform: 'uppercase',
-  },
-  feedbackBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: DD_SPACING.sm,
-    paddingHorizontal: DD_SPACING.md,
-    paddingVertical: DD_SPACING.sm,
-    borderRadius: DD_RADII.card,
-    marginBottom: DD_SPACING.md,
-    borderWidth: 1,
-  },
-  feedbackBannerSuccess: {
-    backgroundColor: 'rgba(0, 230, 118, 0.12)',
-    borderColor: 'rgba(0, 230, 118, 0.3)',
-  },
-  feedbackBannerError: {
-    backgroundColor: 'rgba(255, 82, 82, 0.12)',
-    borderColor: 'rgba(255, 82, 82, 0.3)',
-  },
-  feedbackTextSuccess: {
-    color: DD_COLORS.success,
-    fontWeight: '600',
-    flex: 1,
-  },
-  feedbackTextError: {
-    color: DD_COLORS.danger,
-    fontWeight: '600',
-    flex: 1,
   },
   spotlightSection: {
     marginBottom: DD_SPACING.xl,

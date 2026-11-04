@@ -23,6 +23,7 @@ export interface PendingReview {
   completion: DbCompletion;
   challengeTitle: string;
   participantName: string;
+  isResubmission?: boolean;
 }
 
 export interface ReviewRpcArgs {
@@ -77,6 +78,7 @@ export function buildPendingReviews(
         completion,
         challengeTitle: challenge?.title || 'Challenge',
         participantName: participantDisplayName(completion.participant_id, challenge),
+        isResubmission: isResubmission(completion),
       };
     });
 }
@@ -146,6 +148,142 @@ export function translateReviewError(error: { code?: string; message?: string } 
 
 /** Short, locale-aware "submitted" label, e.g. "24 Oct, 12:43". */
 export function formatSubmittedAt(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+/** 48-hour resubmission grace window constants. */
+export const RESUBMISSION_GRACE_PERIOD_HOURS = 48;
+export const RESUBMISSION_GRACE_PERIOD_MS = RESUBMISSION_GRACE_PERIOD_HOURS * 60 * 60 * 1000;
+
+export interface ResubmissionGraceStatus {
+  isExpired: boolean;
+  isUnverifiable: boolean;
+  hoursRemaining: number;
+  minutesRemaining: number;
+  label: string;
+  formattedDeadline: string;
+}
+
+/**
+ * Determines whether a completion represents a resubmission (i.e. has archived
+ * previous rejection reason, or distinct initial submission timestamp).
+ */
+export function isResubmission(
+  completion:
+    | Pick<DbCompletion, 'status' | 'last_rejection_reason' | 'first_submitted_at' | 'submitted_at'>
+    | null
+    | undefined,
+): boolean {
+  if (!completion) return false;
+  if (completion.last_rejection_reason && completion.last_rejection_reason.trim().length > 0) {
+    return true;
+  }
+  if (
+    completion.first_submitted_at &&
+    completion.submitted_at &&
+    completion.first_submitted_at !== completion.submitted_at
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Calculates the status of the 48-hour resubmission grace window relative to
+ * when the submission was rejected (reviewed_at).
+ * Informational display only; PostgreSQL remains authoritative.
+ */
+export function getResubmissionGraceStatus(
+  reviewedAt: string | null | undefined,
+  nowMs: number = Date.now(),
+): ResubmissionGraceStatus {
+  if (!reviewedAt || typeof reviewedAt !== 'string' || reviewedAt.trim() === '') {
+    return {
+      isExpired: true,
+      isUnverifiable: true,
+      hoursRemaining: 0,
+      minutesRemaining: 0,
+      label: 'Rejection timestamp unavailable',
+      formattedDeadline: '—',
+    };
+  }
+
+  const reviewedTime = Date.parse(reviewedAt);
+  if (Number.isNaN(reviewedTime) || reviewedTime <= 0) {
+    return {
+      isExpired: true,
+      isUnverifiable: true,
+      hoursRemaining: 0,
+      minutesRemaining: 0,
+      label: 'Rejection timestamp invalid',
+      formattedDeadline: '—',
+    };
+  }
+
+  const deadlineTime = reviewedTime + RESUBMISSION_GRACE_PERIOD_MS;
+  const remainingMs = deadlineTime - nowMs;
+
+  // Exact 48-hour boundary matching PostgreSQL strict rule:
+  // reviewed_at < now() - INTERVAL '48 hours' <=> now() - reviewed_at > 48 hours (remainingMs < 0).
+  // At 48h - 1ms: active (isExpired = false).
+  // At exactly 48h: active (remainingMs = 0, isExpired = false).
+  // At 48h + 1ms: expired (remainingMs = -1ms < 0, isExpired = true).
+  const isExpired = remainingMs < 0;
+
+  const deadlineDate = new Date(deadlineTime);
+  const formattedDeadline = Number.isNaN(deadlineDate.getTime())
+    ? '—'
+    : deadlineDate.toLocaleString(undefined, {
+        day: 'numeric',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+  if (isExpired) {
+    return {
+      isExpired: true,
+      isUnverifiable: false,
+      hoursRemaining: 0,
+      minutesRemaining: 0,
+      label: 'Resubmission window expired',
+      formattedDeadline,
+    };
+  }
+
+  const totalMinutes = Math.floor(remainingMs / (60 * 1000));
+  const hoursRemaining = Math.floor(totalMinutes / 60);
+  const minutesRemaining = totalMinutes % 60;
+
+  let label = '';
+  if (hoursRemaining >= 1) {
+    label = `${hoursRemaining}h remaining to resubmit`;
+  } else if (minutesRemaining > 0) {
+    label = `${minutesRemaining}m remaining to resubmit`;
+  } else {
+    label = '< 1m remaining to resubmit';
+  }
+
+  return {
+    isExpired: false,
+    isUnverifiable: false,
+    hoursRemaining,
+    minutesRemaining,
+    label,
+    formattedDeadline,
+  };
+}
+
+/** Short, locale-aware "reviewed" label, e.g. "24 Oct, 12:43". */
+export function formatReviewedAt(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';

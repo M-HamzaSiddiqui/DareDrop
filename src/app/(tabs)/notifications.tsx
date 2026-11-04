@@ -20,6 +20,7 @@ import { DDCard } from '@/components/ui/dd-card';
 import { DDIcon, type DDIconName } from '@/components/ui/dd-icon';
 import { DDSkeleton } from '@/components/ui/dd-skeleton';
 import { DDText } from '@/components/ui/dd-text';
+import { useToast } from '@/components/ui/dd-toast';
 import { useAuth } from '@/lib/auth-context';
 import {
   AppNotification,
@@ -52,6 +53,7 @@ export default function NotificationsScreen() {
   const insets = useSafeAreaInsets();
   const { refreshUnreadNotificationsCount, decrementUnreadCount } = useChallenges();
   const { isGuest, showAuthModal } = useAuth();
+  const toast = useToast();
 
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [loading, setLoading] = useState<boolean>(!isGuest);
@@ -143,8 +145,10 @@ export default function NotificationsScreen() {
     try {
       await markAllNotificationsAsRead(unreadIds);
       await refreshUnreadNotificationsCount();
+      toast.success('All notifications marked as read');
     } catch (err) {
       console.warn('[DareDrop Notifications] Error marking all read:', err);
+      toast.error('Unable to mark notifications as read. Please try again.');
     }
   };
 
@@ -260,7 +264,7 @@ export default function NotificationsScreen() {
         style={styles.scroll}
         contentContainerStyle={[
           styles.content,
-          { paddingBottom: insets.bottom + DD_SPACING['3xl'] },
+          { paddingBottom: insets.bottom + 110 },
         ]}
         showsVerticalScrollIndicator={false}
         refreshControl={

@@ -1,5 +1,18 @@
 export type Category = 'Fitness' | 'Focus' | 'Fun' | 'Learning';
 
+export type ProofMethod =
+  | 'peer_confirmation'
+  | 'text_log'
+  | 'numeric_entry'
+  | 'photo_code'
+  | 'physical_action';
+
+export interface ProofConfig {
+  unit?: string;
+  min_value?: number;
+  max_value?: number;
+}
+
 export interface Challenge {
   id: string;
   title: string;
@@ -14,12 +27,17 @@ export interface Challenge {
   joined: boolean;
   challengeType: 'daily' | 'one_time';
   timezone: string;
+  proofMethod: ProofMethod;
+  proofConfig: ProofConfig;
 }
 
 /**
  * Returns today's and yesterday's calendar dates (YYYY-MM-DD) in the challenge's timezone.
  */
-export function getChallengeDates(timeZone: string = 'UTC'): { today: string; yesterday: string } {
+export function getChallengeDates(
+  timeZone: string = 'UTC',
+  referenceDate: Date = new Date()
+): { today: string; yesterday: string } {
   try {
     const formatter = new Intl.DateTimeFormat('en-CA', {
       timeZone: timeZone || 'UTC',
@@ -27,13 +45,12 @@ export function getChallengeDates(timeZone: string = 'UTC'): { today: string; ye
       month: '2-digit',
       day: '2-digit',
     });
-    const now = new Date();
-    const today = formatter.format(now);
-    const yesterday = formatter.format(new Date(now.getTime() - 24 * 60 * 60 * 1000));
+    const today = formatter.format(referenceDate);
+    const yesterday = formatter.format(new Date(referenceDate.getTime() - 24 * 60 * 60 * 1000));
     return { today, yesterday };
   } catch {
-    const today = new Date().toISOString().split('T')[0];
-    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const today = referenceDate.toISOString().split('T')[0];
+    const yesterday = new Date(referenceDate.getTime() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     return { today, yesterday };
   }
 }
@@ -159,6 +176,8 @@ export const MOCK_CHALLENGES: Challenge[] = RAW_MOCK_CHALLENGES.map((c) => ({
   challengeType: 'daily' as const,
   timezone: 'UTC',
   creatorId: null,
+  proofMethod: 'physical_action' as const,
+  proofConfig: {},
 }));
 
 export function timeRemaining(endsAt: Date): string {

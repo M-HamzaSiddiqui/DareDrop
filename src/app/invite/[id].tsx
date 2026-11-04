@@ -32,6 +32,7 @@ import { DDButton } from '@/components/ui/dd-button';
 import { DDCard } from '@/components/ui/dd-card';
 import { DDIcon, type DDIconName } from '@/components/ui/dd-icon';
 import { DDText } from '@/components/ui/dd-text';
+import { useToast, sanitizeUserErrorMessage } from '@/components/ui/dd-toast';
 
 const CATEGORY_ICONS: Record<CategoryKey, DDIconName> = {
   Fitness: 'flame',
@@ -59,6 +60,7 @@ export default function InviteScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { challenges, fetchChallengeById, joinChallenge, isUserJoined } = useChallenges();
   const { isGuest, showAuthModal } = useAuth();
+  const toast = useToast();
   const insets = useSafeAreaInsets();
 
   const [loading, setLoading] = useState(true);
@@ -66,7 +68,6 @@ export default function InviteScreen() {
   const [error, setError] = useState<string | null>(null);
   const [isJoining, setIsJoining] = useState(false);
   const [justJoined, setJustJoined] = useState(false);
-  const [copiedToast, setCopiedToast] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -122,6 +123,7 @@ export default function InviteScreen() {
       const res = await joinChallenge(challenge.id);
       if (res.success) {
         setJustJoined(true);
+        toast.success(`You joined "${challenge.title}"!`);
         const inStore = challenges.find((c) => c.id === challenge.id);
         setChallenge((prev) =>
           prev
@@ -133,10 +135,14 @@ export default function InviteScreen() {
             : null,
         );
       } else {
-        setError(res.error || 'Failed to join challenge. Please try again.');
+        const msg = sanitizeUserErrorMessage(res.error, 'Failed to join challenge. Please try again.');
+        setError(msg);
+        toast.error(msg);
       }
     } catch (err: any) {
-      setError(err?.message || 'Error accepting challenge.');
+      const msg = sanitizeUserErrorMessage(err?.message, 'Error accepting challenge.');
+      setError(msg);
+      toast.error(msg);
     } finally {
       setIsJoining(false);
     }
@@ -146,8 +152,7 @@ export default function InviteScreen() {
     if (!challenge) return;
     const res = await copyInviteLink(challenge);
     if (res.success) {
-      setCopiedToast('Invite link copied to clipboard!');
-      setTimeout(() => setCopiedToast(null), 2500);
+      toast.success('Invite link copied to clipboard!');
     }
   }
 
@@ -224,15 +229,6 @@ export default function InviteScreen() {
     <View style={styles.root}>
       <StatusBar style="light" />
 
-      {/* Floating toast notification */}
-      {copiedToast ? (
-        <View style={[styles.toastContainer, { top: insets.top + DD_SPACING.sm }]}>
-          <DDIcon name="check-circle" size={16} color={DD_COLORS.lime} weight="fill" />
-          <DDText variant="caption" color="lime" bold style={styles.toastText}>
-            {copiedToast}
-          </DDText>
-        </View>
-      ) : null}
 
       {/* Header bar */}
       <View style={[styles.navBar, { paddingTop: insets.top + DD_SPACING.xs }]}>
@@ -528,28 +524,6 @@ const styles = StyleSheet.create({
   },
   errorCta: {
     marginTop: DD_SPACING.xs,
-  },
-  toastContainer: {
-    position: 'absolute',
-    alignSelf: 'center',
-    zIndex: 999,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: DD_COLORS.bgCard,
-    borderWidth: 1.5,
-    borderColor: DD_COLORS.lime,
-    paddingVertical: DD_SPACING.xs,
-    paddingHorizontal: DD_SPACING.md,
-    borderRadius: DD_RADII.pill,
-    shadowColor: DD_COLORS.lime,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 8,
-    gap: DD_SPACING.xs,
-  },
-  toastText: {
-    letterSpacing: 0.2,
   },
   navBar: {
     paddingHorizontal: DD_SPACING.md,

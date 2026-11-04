@@ -17,6 +17,8 @@ import {
 import { ChallengesProvider } from '@/store/challenges-store';
 import { DD_COLORS } from '@/constants/dd-theme';
 
+import { ToastProvider } from '@/components/ui/dd-toast';
+
 SplashScreen.preventAutoHideAsync();
 
 const DareDropTheme = {
@@ -74,25 +76,26 @@ export default function RootLayout() {
     <ThemeProvider value={DareDropTheme}>
       <AuthProvider>
         <ChallengesProvider>
-          <StatusBar style="light" />
-          <NotificationSync />
-          <AuthPromptModal />
-          <AnimatedSplashOverlay />
-          <Stack
-            screenOptions={{
-              headerShown: false,
-              contentStyle: { backgroundColor: DD_COLORS.bg },
-              animation: 'fade',
-            }}>
-            <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-            <Stack.Screen name="auth" options={{ presentation: 'modal', headerShown: false }} />
-            <Stack.Screen name="auth/callback" options={{ headerShown: false }} />
-            <Stack.Screen name="challenge/[id]" options={{ headerShown: false }} />
-            <Stack.Screen name="invite/[id]" options={{ headerShown: false }} />
-            <Stack.Screen name="review/[id]" options={{ headerShown: false }} />
-            <Stack.Screen name="notifications" options={{ headerShown: false }} />
-            <Stack.Screen name="friends" options={{ headerShown: false }} />
-          </Stack>
+          <ToastProvider>
+            <StatusBar style="light" />
+            <NotificationSync />
+            <AuthPromptModal />
+            <AnimatedSplashOverlay />
+            <Stack
+              screenOptions={{
+                headerShown: false,
+                contentStyle: { backgroundColor: DD_COLORS.bg },
+                animation: 'fade',
+              }}>
+              <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+              <Stack.Screen name="auth" options={{ presentation: 'modal', headerShown: false }} />
+              <Stack.Screen name="auth/callback" options={{ headerShown: false }} />
+              <Stack.Screen name="challenge/[id]" options={{ headerShown: false }} />
+              <Stack.Screen name="invite/[id]" options={{ headerShown: false }} />
+              <Stack.Screen name="review/[id]" options={{ headerShown: false }} />
+              <Stack.Screen name="friends" options={{ headerShown: false }} />
+            </Stack>
+          </ToastProvider>
         </ChallengesProvider>
       </AuthProvider>
     </ThemeProvider>

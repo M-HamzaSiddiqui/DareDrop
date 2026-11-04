@@ -5,6 +5,7 @@ import {
   ActivityIndicator,
   AppState,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -29,7 +30,9 @@ import { useAuth } from '@/lib/auth-context';
 import { buildCompletionsChannelName, subscribeToCompletions } from '@/lib/realtime';
 import {
   canUserReview,
+  formatReviewedAt,
   formatSubmittedAt,
+  isResubmission,
   MAX_REJECTION_REASON_LENGTH,
   participantDisplayName,
 } from '@/lib/reviews';
@@ -436,16 +439,51 @@ export default function ReviewDetailsScreen() {
             </DDText>
           </View>
 
+          {completion.numeric_value !== null && completion.numeric_value !== undefined ? (
+            <View style={styles.detailRow}>
+              <View style={styles.detailLabelGroup}>
+                <DDIcon name="target" size={14} color={DD_COLORS.textMuted} weight="bold" />
+                <DDText variant="bodySm" color="secondary">
+                  Recorded Metric
+                </DDText>
+              </View>
+              <DDText variant="bodySm" color="lime" bold>
+                {completion.numeric_value} {challenge?.proofConfig?.unit || ''}
+              </DDText>
+            </View>
+          ) : null}
+
+          {completion.text_entry ? (
+            <View style={styles.noteBox}>
+              <DDText variant="caption" color="muted" style={styles.noteHeading}>
+                Written Log Entry
+              </DDText>
+              <DDText variant="bodySm" color="primary" style={styles.noteContent}>
+                &quot;{completion.text_entry}&quot;
+              </DDText>
+            </View>
+          ) : null}
+
           <View style={styles.detailRow}>
             <DDText variant="bodySm" color="secondary">
               Review Status
             </DDText>
             {completion.status === 'pending' && (
-              <View style={styles.statusPendingPill}>
-                <DDIcon name="clock" size={12} color={DD_COLORS.warning} weight="bold" />
-                <DDText variant="caption" color="warning" bold>
-                  Pending Verification
-                </DDText>
+              <View style={styles.statusPillsRow}>
+                {isResubmission(completion) && (
+                  <View style={styles.statusResubmissionPill}>
+                    <DDIcon name="refresh" size={12} color={DD_COLORS.coral} weight="bold" />
+                    <DDText variant="caption" color="coral" bold>
+                      Resubmission
+                    </DDText>
+                  </View>
+                )}
+                <View style={styles.statusPendingPill}>
+                  <DDIcon name="clock" size={12} color={DD_COLORS.warning} weight="bold" />
+                  <DDText variant="caption" color="warning" bold>
+                    Pending Verification
+                  </DDText>
+                </View>
               </View>
             )}
             {completion.status === 'approved' && (
@@ -476,6 +514,39 @@ export default function ReviewDetailsScreen() {
             </DDText>
           </View>
 
+          {/* Previous Rejection / Resubmission Context for Verifier */}
+          {isResubmission(completion) && (
+            <View style={styles.resubmissionCard}>
+              <View style={styles.resubmissionHeader}>
+                <DDIcon name="warning" size={15} color={DD_COLORS.coral} weight="bold" />
+                <DDText variant="caption" color="coral" bold style={styles.resubmissionTitle}>
+                  Resubmission Details
+                </DDText>
+              </View>
+              <DDText variant="caption" color="secondary" style={styles.resubmissionHint}>
+                This participant previously had a submission rejected for this date.
+              </DDText>
+              {completion.last_rejection_reason ? (
+                <View style={styles.previousFeedbackBox}>
+                  <DDText variant="caption" color="muted" bold style={styles.previousFeedbackHeading}>
+                    PREVIOUS VERIFIER FEEDBACK
+                  </DDText>
+                  <DDText variant="bodySm" color="primary" style={styles.previousFeedbackContent}>
+                    &quot;{completion.last_rejection_reason}&quot;
+                  </DDText>
+                </View>
+              ) : null}
+              {completion.last_reviewed_at ? (
+                <View style={styles.previousReviewRow}>
+                  <DDIcon name="clock" size={12} color={DD_COLORS.textMuted} weight="bold" />
+                  <DDText variant="caption" color="muted" style={{ marginLeft: 4 }}>
+                    Previous review: {formatReviewedAt(completion.last_reviewed_at)}
+                  </DDText>
+                </View>
+              ) : null}
+            </View>
+          )}
+
           {/* Rejection reason if already rejected */}
           {completion.status === 'rejected' && completion.rejection_reason ? (
             <View style={styles.rejectionBox}>
@@ -489,25 +560,182 @@ export default function ReviewDetailsScreen() {
           ) : null}
         </DDCard>
 
-        {/* WhatsApp Proof Advisory Card */}
-        <DDCard variant="highlight" padding="lg" style={styles.whatsappCard}>
-          <View style={styles.whatsappHeader}>
-            <View style={styles.whatsappIconCircle}>
-              <DDIcon name="send" size={18} color={DD_COLORS.lime} weight="fill" />
+        {/* Method-Specific Proof Verification Card */}
+        {completion.numeric_value !== null && completion.numeric_value !== undefined ? (
+          <DDCard variant="highlight" padding="lg" style={styles.proofVerificationCard}>
+            <View style={styles.proofVerificationHeader}>
+              <View style={styles.proofShieldIconCircle}>
+                <DDIcon name="target" size={20} color={DD_COLORS.lime} weight="fill" />
+              </View>
+              <View style={styles.proofHeaderTextGroup}>
+                <DDText variant="title" color="primary" bold>
+                  Submitted Metric
+                </DDText>
+                <DDText variant="caption" color="lime" bold>
+                  Numeric Verification
+                </DDText>
+              </View>
             </View>
-            <View style={styles.whatsappHeaderText}>
-              <DDText variant="title" color="primary" bold>
-                Peer-to-Peer Proof Verification
-              </DDText>
-              <DDText variant="caption" color="lime" bold>
-                Zero-Cloud Privacy
+
+            <View style={styles.proofCriteriaBox}>
+              <View style={styles.proofCriteriaRow}>
+                <DDText variant="caption" color="muted" bold>
+                  RECORDED VALUE
+                </DDText>
+                <View style={styles.proofCodeBadge}>
+                  <DDText variant="title" color="lime" bold style={styles.proofCodeText}>
+                    {completion.numeric_value} {challenge?.proofConfig?.unit || ''}
+                  </DDText>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.proofReviewNotice}>
+              <DDIcon name="info" size={14} color={DD_COLORS.info} weight="bold" />
+              <DDText variant="caption" color="secondary" style={styles.proofReviewNoticeText}>
+                Confirm that {participantName}&apos;s recorded metric ({completion.numeric_value} {challenge?.proofConfig?.unit || ''}) matches your observation or agreement before approving.
               </DDText>
             </View>
-          </View>
-          <DDText variant="bodySm" color="secondary" style={styles.whatsappDesc}>
-            Proof photos and videos are shared directly with you via WhatsApp or messages. Please check that {participantName} sent you proof before approving this dare.
-          </DDText>
-        </DDCard>
+          </DDCard>
+        ) : completion.text_entry ? (
+          <DDCard variant="highlight" padding="lg" style={styles.proofVerificationCard}>
+            <View style={styles.proofVerificationHeader}>
+              <View style={styles.proofShieldIconCircle}>
+                <DDIcon name="compass" size={20} color={DD_COLORS.lime} weight="fill" />
+              </View>
+              <View style={styles.proofHeaderTextGroup}>
+                <DDText variant="title" color="primary" bold>
+                  Written Proof Log
+                </DDText>
+                <DDText variant="caption" color="lime" bold>
+                  Text Log Verification
+                </DDText>
+              </View>
+            </View>
+
+            <View style={styles.proofCriteriaBox}>
+              <DDText variant="caption" color="muted" bold>
+                PARTICIPANT LOG
+              </DDText>
+              <DDText variant="body" color="primary" style={{ marginTop: 4, lineHeight: 20 }}>
+                &quot;{completion.text_entry}&quot;
+              </DDText>
+            </View>
+
+            <View style={styles.proofReviewNotice}>
+              <DDIcon name="info" size={14} color={DD_COLORS.info} weight="bold" />
+              <DDText variant="caption" color="secondary" style={styles.proofReviewNoticeText}>
+                Read {participantName}&apos;s log entry and confirm that it satisfies the dare requirements before approving.
+              </DDText>
+            </View>
+          </DDCard>
+        ) : completion.proof_code ? (
+          <DDCard variant="highlight" padding="lg" style={styles.proofVerificationCard}>
+            <View style={styles.proofVerificationHeader}>
+              <View style={styles.proofShieldIconCircle}>
+                <DDIcon name="shield-check" size={20} color={DD_COLORS.lime} weight="fill" />
+              </View>
+              <View style={styles.proofHeaderTextGroup}>
+                <DDText variant="title" color="primary" bold>
+                  {completion.action_prompt_id === 'write_code_on_paper' || challenge?.proofMethod === 'photo_code'
+                    ? 'Photo Proof Verification'
+                    : 'Dynamic Proof Verification'}
+                </DDText>
+                <DDText variant="caption" color="lime" bold>
+                  Peer Anti-Cheat Check
+                </DDText>
+              </View>
+            </View>
+
+            <View style={styles.proofCriteriaBox}>
+              <View style={styles.proofCriteriaRow}>
+                <DDText variant="caption" color="muted" bold>
+                  REQUIRED PROOF CODE
+                </DDText>
+                <View style={styles.proofCodeBadge}>
+                  <DDText variant="title" color="lime" bold style={styles.proofCodeText}>
+                    {completion.proof_code}
+                  </DDText>
+                </View>
+              </View>
+
+              {completion.action_prompt && completion.action_prompt_id !== 'write_code_on_paper' ? (
+                <View style={styles.proofActionCriterion}>
+                  <DDText variant="caption" color="muted" bold>
+                    REQUIRED GESTURE / ACTION
+                  </DDText>
+                  <DDText variant="body" color="primary" bold style={styles.actionPromptText}>
+                    {completion.action_prompt}
+                  </DDText>
+                </View>
+              ) : (
+                <View style={styles.proofActionCriterion}>
+                  <DDText variant="caption" color="muted" bold>
+                    PHOTO REQUIREMENT
+                  </DDText>
+                  <DDText variant="body" color="primary" bold style={styles.actionPromptText}>
+                    Code written on paper or note with photo evidence
+                  </DDText>
+                </View>
+              )}
+            </View>
+
+            <View style={styles.proofReviewNotice}>
+              <DDIcon name="info" size={14} color={DD_COLORS.info} weight="bold" />
+              <DDText variant="caption" color="secondary" style={styles.proofReviewNoticeText}>
+                {completion.action_prompt_id === 'write_code_on_paper' || challenge?.proofMethod === 'photo_code' ? (
+                  <>
+                    Check the photo sent to you on WhatsApp. Confirm that {participantName} clearly wrote code{' '}
+                    <DDText variant="caption" color="lime" bold>{completion.proof_code}</DDText> on paper and included it in their photo before approving.
+                  </>
+                ) : (
+                  <>
+                    Check the photo/video sent to you on WhatsApp. Confirm that {participantName} clearly showed code{' '}
+                    <DDText variant="caption" color="lime" bold>{completion.proof_code}</DDText> and demonstrated the gesture before approving.
+                  </>
+                )}
+              </DDText>
+            </View>
+          </DDCard>
+        ) : challenge?.proofMethod === 'peer_confirmation' ? (
+          <DDCard variant="highlight" padding="lg" style={styles.proofVerificationCard}>
+            <View style={styles.proofVerificationHeader}>
+              <View style={styles.proofShieldIconCircle}>
+                <DDIcon name="verify" size={20} color={DD_COLORS.lime} weight="fill" />
+              </View>
+              <View style={styles.proofHeaderTextGroup}>
+                <DDText variant="title" color="primary" bold>
+                  Peer Honor Verification
+                </DDText>
+                <DDText variant="caption" color="lime" bold>
+                  Honor-System Verification
+                </DDText>
+              </View>
+            </View>
+            <DDText variant="bodySm" color="secondary" style={styles.whatsappDesc}>
+              This challenge uses peer confirmation. Confirm that you witnessed or can vouch that {participantName} completed this dare before approving.
+            </DDText>
+          </DDCard>
+        ) : (
+          <DDCard variant="highlight" padding="lg" style={styles.whatsappCard}>
+            <View style={styles.whatsappHeader}>
+              <View style={styles.whatsappIconCircle}>
+                <DDIcon name="send" size={18} color={DD_COLORS.lime} weight="fill" />
+              </View>
+              <View style={styles.whatsappHeaderText}>
+                <DDText variant="title" color="primary" bold>
+                  Peer-to-Peer Proof Verification
+                </DDText>
+                <DDText variant="caption" color="lime" bold>
+                  Zero-Cloud Privacy
+                </DDText>
+              </View>
+            </View>
+            <DDText variant="bodySm" color="secondary" style={styles.whatsappDesc}>
+              Proof photos and videos are shared directly with you via WhatsApp or messages. Please check that {participantName} sent you proof before approving this dare.
+            </DDText>
+          </DDCard>
+        )}
 
         {/* Review Action Buttons (When authorized and pending) */}
         {isEligibleReviewer && !isReviewed && (
@@ -653,7 +881,7 @@ export default function ReviewDetailsScreen() {
 
             <TextInput
               style={styles.modalInput}
-              placeholder="e.g. Proof photo on WhatsApp was unclear, please resend"
+              placeholder="e.g. Proof was unclear, incomplete, or not received"
               placeholderTextColor={DD_COLORS.textMuted}
               value={rejectionReason}
               onChangeText={setRejectionReason}
@@ -862,6 +1090,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
   },
+  statusPillsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  statusResubmissionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(255, 107, 53, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 53, 0.35)',
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 3,
+    borderRadius: DD_RADII.pill,
+  },
   statusPendingPill: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -904,6 +1148,46 @@ const styles = StyleSheet.create({
     gap: 4,
     marginTop: DD_SPACING.xs,
   },
+  resubmissionCard: {
+    backgroundColor: 'rgba(255, 107, 53, 0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 53, 0.25)',
+    borderRadius: DD_RADII.md,
+    padding: DD_SPACING.md,
+    marginTop: DD_SPACING.sm,
+  },
+  resubmissionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+  },
+  resubmissionTitle: {
+    fontSize: 13,
+  },
+  resubmissionHint: {
+    marginBottom: DD_SPACING.xs,
+  },
+  previousFeedbackBox: {
+    backgroundColor: 'rgba(0, 0, 0, 0.25)',
+    borderRadius: DD_RADII.sm,
+    padding: DD_SPACING.sm,
+    marginTop: 4,
+    borderLeftWidth: 2,
+    borderLeftColor: DD_COLORS.coral,
+  },
+  previousFeedbackHeading: {
+    fontSize: 10,
+    letterSpacing: 0.8,
+  },
+  previousFeedbackContent: {
+    marginTop: 2,
+  },
+  previousReviewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+  },
   noteHeading: {
     fontSize: 10,
     textTransform: 'uppercase',
@@ -920,6 +1204,76 @@ const styles = StyleSheet.create({
     borderRadius: DD_RADII.md,
     padding: DD_SPACING.md,
     gap: 4,
+  },
+  proofVerificationCard: {
+    gap: DD_SPACING.sm,
+    borderColor: 'rgba(191, 253, 64, 0.35)',
+    borderWidth: 1,
+  },
+  proofVerificationHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+  },
+  proofShieldIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  proofHeaderTextGroup: {
+    flex: 1,
+    gap: 2,
+  },
+  proofCriteriaBox: {
+    backgroundColor: DD_COLORS.bgCard,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    borderRadius: DD_RADII.md,
+    padding: DD_SPACING.md,
+    gap: DD_SPACING.sm,
+  },
+  proofCriteriaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  proofCodeBadge: {
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(191, 253, 64, 0.4)',
+    paddingHorizontal: DD_SPACING.md,
+    paddingVertical: 4,
+    borderRadius: DD_RADII.sm,
+  },
+  proofCodeText: {
+    letterSpacing: 3,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  proofActionCriterion: {
+    gap: 4,
+    paddingTop: DD_SPACING.xs,
+    borderTopWidth: 1,
+    borderTopColor: DD_COLORS.borderSubtle,
+  },
+  actionPromptText: {
+    lineHeight: 20,
+  },
+  proofReviewNotice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: DD_SPACING.xs,
+    backgroundColor: 'rgba(0, 212, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 212, 255, 0.25)',
+    padding: DD_SPACING.sm,
+    borderRadius: DD_RADII.md,
+  },
+  proofReviewNoticeText: {
+    flex: 1,
+    lineHeight: 18,
   },
   whatsappCard: {
     gap: DD_SPACING.sm,

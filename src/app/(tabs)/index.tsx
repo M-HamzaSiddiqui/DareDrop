@@ -24,7 +24,7 @@ import { DDCard } from '@/components/ui/dd-card';
 import { DDIcon } from '@/components/ui/dd-icon';
 import { DDSkeleton } from '@/components/ui/dd-skeleton';
 import { DDText } from '@/components/ui/dd-text';
-import { formatSubmittedAt } from '@/lib/reviews';
+import { formatSubmittedAt, isResubmission } from '@/lib/reviews';
 import { useAuth } from '@/lib/auth-context';
 import { useChallenges } from '@/store/challenges-store';
 
@@ -429,12 +429,22 @@ export default function HomeScreen() {
                         </View>
                       </View>
 
-                      <DDBadge
-                        label="Verify Dare"
-                        variant="warning"
-                        size="sm"
-                        icon="verify"
-                      />
+                      <View style={styles.pendingBadgeRow}>
+                        {isResubmission(item.completion) && (
+                          <DDBadge
+                            label="Resubmission"
+                            variant="coral"
+                            size="sm"
+                            icon="refresh"
+                          />
+                        )}
+                        <DDBadge
+                          label="Verify Dare"
+                          variant="warning"
+                          size="sm"
+                          icon="verify"
+                        />
+                      </View>
                     </View>
 
                     <DDText variant="h3" color="primary" numberOfLines={1} style={styles.pendingChallengeTitle}>
@@ -445,6 +455,14 @@ export default function HomeScreen() {
                       <View style={styles.pendingNoteContainer}>
                         <DDText variant="caption" color="secondary" numberOfLines={2} style={styles.pendingNoteText}>
                           &quot;{item.completion.submission_note}&quot;
+                        </DDText>
+                      </View>
+                    ) : null}
+
+                    {isResubmission(item.completion) && item.completion.last_rejection_reason ? (
+                      <View style={styles.pendingResubmitNoteContainer}>
+                        <DDText variant="caption" color="coral" numberOfLines={2}>
+                          Previous feedback: &quot;{item.completion.last_rejection_reason}&quot;
                         </DDText>
                       </View>
                     ) : null}
@@ -905,6 +923,11 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: DD_SPACING.sm,
   },
+  pendingBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.xs,
+  },
   pendingUserRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -927,6 +950,15 @@ const styles = StyleSheet.create({
   },
   pendingNoteText: {
     fontStyle: 'italic',
+  },
+  pendingResubmitNoteContainer: {
+    backgroundColor: 'rgba(255, 107, 53, 0.08)',
+    paddingHorizontal: DD_SPACING.md,
+    paddingVertical: DD_SPACING.xs,
+    borderRadius: DD_RADII.sm,
+    borderLeftWidth: 2,
+    borderLeftColor: DD_COLORS.coral,
+    marginBottom: DD_SPACING.sm,
   },
   pendingCardFooter: {
     flexDirection: 'row',

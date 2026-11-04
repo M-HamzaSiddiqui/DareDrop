@@ -88,6 +88,8 @@ export interface ProofShareOptions {
   completionDate?: string;
   note?: string;
   verifierName?: string;
+  proofCode?: string;
+  actionPrompt?: string;
 }
 
 /**
@@ -97,8 +99,10 @@ export interface ProofShareOptions {
  */
 export async function openWhatsAppProofShare(options: ProofShareOptions): Promise<boolean> {
   const dateStr = options.completionDate ? ` for ${options.completionDate}` : '';
+  const proofCodeStr = options.proofCode ? `\n\n🔢 Proof Code: *${options.proofCode}*` : '';
+  const actionPromptStr = options.actionPrompt ? `\n⚡ Required Action: *${options.actionPrompt}*` : '';
   const noteStr = options.note ? `\n\nNotes: "${options.note}"` : '';
-  const message = `👋 Hey ${options.verifierName || 'Verifier'}! I just submitted my DareDrop completion${dateStr} for "${options.challengeTitle}".${noteStr}\n\nHere is my proof photo/video 📸👇 Please verify it on DareDrop!`;
+  const message = `👋 Hey ${options.verifierName || 'Verifier'}! I just submitted my DareDrop completion${dateStr} for "${options.challengeTitle}".${proofCodeStr}${actionPromptStr}${noteStr}\n\nHere is my proof photo/video 📸👇 Please verify it on DareDrop!`;
   const url = `https://wa.me/?text=${encodeURIComponent(message)}`;
 
   try {

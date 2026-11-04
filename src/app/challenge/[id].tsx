@@ -1,6 +1,6 @@
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
@@ -36,7 +36,10 @@ import {
   shareChallenge,
 } from '@/lib/sharing';
 import {
+  formatReviewedAt,
   formatSubmittedAt,
+  getResubmissionGraceStatus,
+  isResubmission,
   MAX_REJECTION_REASON_LENGTH,
   participantDisplayName,
   splitCompletionsForUser,
@@ -44,6 +47,7 @@ import {
 import { buildCompletionsChannelName, subscribeToCompletions } from '@/lib/realtime';
 import {
   DbCompletion,
+  DbProofChallenge,
   EligibleVerifier,
   isSupabaseConfigured,
   ParticipantProgress,
@@ -63,6 +67,7 @@ import { DDButton } from '@/components/ui/dd-button';
 import { DDCard } from '@/components/ui/dd-card';
 import { DDIcon, type DDIconName } from '@/components/ui/dd-icon';
 import { DDText } from '@/components/ui/dd-text';
+import { useToast, sanitizeUserErrorMessage } from '@/components/ui/dd-toast';
 
 const CATEGORY_ICONS: Record<CategoryKey, DDIconName> = {
   Fitness: 'flame',
@@ -92,6 +97,8 @@ export default function ChallengeDetailScreen() {
     challenges,
     joinChallenge,
     fetchChallengeById,
+    generateProofChallenge,
+    cancelProofChallenge,
     submitCompletion,
     fetchCompletions,
     fetchEligibleVerifiers,
@@ -102,12 +109,12 @@ export default function ChallengeDetailScreen() {
     refreshPendingReviews,
   } = useChallenges();
   const { isGuest, showAuthModal } = useAuth();
+  const toast = useToast();
   const insets = useSafeAreaInsets();
 
   const localChallenge = challenges.find((c) => c.id === id);
   const [loadingRemote, setLoadingRemote] = useState(!localChallenge && Boolean(id));
   const [remoteChallenge, setRemoteChallenge] = useState<Challenge | null>(null);
-  const [copiedToast, setCopiedToast] = useState<string | null>(null);
   const [isJoining, setIsJoining] = useState(false);
   const [showLinkInfo, setShowLinkInfo] = useState(false);
 
@@ -121,9 +128,127 @@ export default function ChallengeDetailScreen() {
   const [selectedDate, setSelectedDate] = useState<string>('');
   const [selectedVerifierId, setSelectedVerifierId] = useState<string>('');
   const [submissionNote, setSubmissionNote] = useState<string>('');
+  const [textEntry, setTextEntry] = useState<string>('');
+  const [numericValue, setNumericValue] = useState<string>('');
+  const [activeProofChallenge, setActiveProofChallenge] = useState<DbProofChallenge | null>(null);
+  const [isGeneratingProof, setIsGeneratingProof] = useState(false);
+  const [proofError, setProofError] = useState<string | null>(null);
+  const [dateChangeNotice, setDateChangeNotice] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState<DbCompletion | null>(null);
+
+  // Resubmission grace period ticker: updates countdown on focus, foreground, and 60s tick
+  const [currentTimeMs, setCurrentTimeMs] = useState<number>(Date.now());
+
+  useFocusEffect(
+    useCallback(() => {
+      setCurrentTimeMs(Date.now());
+    }, []),
+  );
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        setCurrentTimeMs(Date.now());
+      }
+    });
+    const interval = setInterval(() => {
+      setCurrentTimeMs(Date.now());
+    }, 60000);
+    return () => {
+      sub.remove();
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Account isolation: reset transient proof state when user identity changes during render
+  const [prevUserId, setPrevUserId] = useState(currentUserId);
+  if (prevUserId !== currentUserId) {
+    setPrevUserId(currentUserId);
+    setActiveProofChallenge(null);
+    setProofError(null);
+    setDateChangeNotice(null);
+    setSubmitError(null);
+    setSubmitSuccess(null);
+    setTextEntry('');
+    setNumericValue('');
+  }
+
+  // Cancellation tracking to prevent duplicate RPC calls
+  const cancelledProofIdsRef = useRef<Set<string>>(new Set());
+
+  const cancelProofChallengeSafe = useCallback(
+    (proof: DbProofChallenge | null | undefined) => {
+      if (!proof || !proof.id) return;
+      if (proof.participant_id !== currentUserId) return;
+      if (cancelledProofIdsRef.current.has(proof.id)) return;
+
+      cancelledProofIdsRef.current.add(proof.id);
+      cancelProofChallenge(proof.id).catch(() => {});
+    },
+    [cancelProofChallenge, currentUserId],
+  );
+
+  // Keep refs for safe cleanup on unmount without unsafe state updates
+  const activeProofChallengeRef = useRef<DbProofChallenge | null>(null);
+  activeProofChallengeRef.current = activeProofChallenge;
+  const submitSuccessRef = useRef<DbCompletion | null>(null);
+  submitSuccessRef.current = submitSuccess;
+
+  useEffect(() => {
+    return () => {
+      const active = activeProofChallengeRef.current;
+      const success = submitSuccessRef.current;
+      if (active && !success) {
+        cancelProofChallengeSafe(active);
+      }
+    };
+  }, [cancelProofChallengeSafe]);
+
+  const closeSubmitModal = useCallback(() => {
+    if (activeProofChallenge && !submitSuccess) {
+      cancelProofChallengeSafe(activeProofChallenge);
+    }
+    setActiveProofChallenge(null);
+    setSubmitModalVisible(false);
+    setSubmitSuccess(null);
+    setSubmitError(null);
+    setProofError(null);
+    setDateChangeNotice(null);
+    setTextEntry('');
+    setNumericValue('');
+  }, [activeProofChallenge, submitSuccess, cancelProofChallengeSafe]);
+
+  const handleSelectDate = useCallback(
+    (newDate: string) => {
+      if (newDate === selectedDate) return;
+      if (activeProofChallenge) {
+        cancelProofChallengeSafe(activeProofChallenge);
+        setActiveProofChallenge(null);
+        setDateChangeNotice('Date changed: proof code reset. Generate a new code to continue.');
+      } else {
+        setDateChangeNotice(null);
+      }
+      setSelectedDate(newDate);
+      setProofError(null);
+    },
+    [selectedDate, activeProofChallenge, cancelProofChallengeSafe],
+  );
+
+  const handleSelectVerifier = useCallback(
+    (newVerifierId: string) => {
+      if (newVerifierId === selectedVerifierId) return;
+      if (activeProofChallenge) {
+        cancelProofChallengeSafe(activeProofChallenge);
+        setActiveProofChallenge(null);
+      }
+      setSelectedVerifierId(newVerifierId);
+      setProofError(null);
+      setDateChangeNotice(null);
+    },
+    [selectedVerifierId, activeProofChallenge, cancelProofChallengeSafe],
+  );
 
   // Reassign Modal state
   const [reassignModalVisible, setReassignModalVisible] = useState(false);
@@ -345,8 +470,7 @@ export default function ChallengeDetailScreen() {
     if (!challenge) return;
     const res = await copyInviteLink(challenge);
     if (res.success) {
-      setCopiedToast('Invite link copied to clipboard!');
-      setTimeout(() => setCopiedToast(null), 3000);
+      toast.success('Invite link copied to clipboard!');
     }
   }
 
@@ -372,7 +496,10 @@ export default function ChallengeDetailScreen() {
   async function handleInviteFriend(friend: UserFriend) {
     if (!challenge) return;
     if (isGuest) {
-      showAuthModal('Account required to invite friends to a Dare. Sign in or register to connect!');
+      showAuthModal({
+        title: 'Sign In to Invite Friends',
+        description: 'Account required to invite friends to a Dare. Sign in or register to connect!',
+      });
       return;
     }
     setInvitingFriendId(friend.friend_user_id);
@@ -380,8 +507,7 @@ export default function ChallengeDetailScreen() {
     try {
       await sendChallengeInvitation(challenge.id, friend.friend_user_id);
       setInvitedFriendIds((prev) => new Set([...prev, friend.friend_user_id]));
-      setCopiedToast(`Invitation sent to ${friend.display_name}!`);
-      setTimeout(() => setCopiedToast(null), 3000);
+      toast.success(`Invitation sent to ${friend.display_name}!`);
     } catch (err: any) {
       setInviteFriendError(translateSocialError(err));
     } finally {
@@ -392,38 +518,127 @@ export default function ChallengeDetailScreen() {
   async function handleJoinToggle() {
     if (!challenge || isJoining) return;
     if (isGuest) {
-      showAuthModal('Account required to join a Dare. Sign in or register to join challenges and track your streaks!');
+      showAuthModal({
+        title: 'Sign In to Join Dare',
+        description: 'Account required to join a Dare. Sign in or register to join challenges and track your streaks!',
+        onSuccess: handleJoinToggle,
+      });
       return;
     }
     setIsJoining(true);
     try {
       const res = await joinChallenge(challenge.id);
       if (res.success) {
-        setCopiedToast(res.joined ? 'Welcome to the challenge!' : 'You left this challenge');
-        setTimeout(() => setCopiedToast(null), 2500);
         if (res.joined) {
+          toast.success('Welcome to the challenge!');
           await refreshVerificationData();
         } else {
+          toast.info('You left this challenge.');
           setCompletions([]);
           setEligibleVerifiers([]);
           setParticipantProgress(null);
         }
+      } else {
+        toast.error(sanitizeUserErrorMessage(res.error, 'Failed to update challenge membership.'));
       }
     } finally {
       setIsJoining(false);
     }
   }
 
+  // Dynamically derive effective proof challenge, binding strictly to current user, selected verifier, and selected date
+  const effectiveProofChallenge =
+    activeProofChallenge &&
+    activeProofChallenge.participant_id === currentUserId &&
+    activeProofChallenge.verifier_id === selectedVerifierId &&
+    activeProofChallenge.completion_date === selectedDate
+      ? activeProofChallenge
+      : null;
+
+  const isProofExpired = Boolean(
+    effectiveProofChallenge &&
+    new Date(effectiveProofChallenge.expires_at).getTime() <= Date.now()
+  );
+
+  const proofMethod = challenge?.proofMethod || 'physical_action';
+  const isProofCodeRequired = proofMethod === 'physical_action' || proofMethod === 'photo_code';
+
+  async function handleGenerateProof() {
+    if (!challenge || !selectedVerifierId || !selectedDate || isGeneratingProof) return;
+
+    if (isGuest) {
+      showAuthModal({
+        title: 'Sign In to Generate Proof Challenge',
+        description: 'A registered account is required to generate dynamic proof challenges.',
+      });
+      return;
+    }
+
+    if (activeProofChallenge) {
+      cancelProofChallengeSafe(activeProofChallenge);
+    }
+
+    setIsGeneratingProof(true);
+    setProofError(null);
+    setDateChangeNotice(null);
+    try {
+      const res = await generateProofChallenge({
+        challengeId: challenge.id,
+        verifierId: selectedVerifierId,
+        completionDate: selectedDate,
+      });
+
+      if (!res.success || !res.proofChallenge) {
+        if (res.isFutureDate && res.serverDate && res.serverDate !== selectedDate) {
+          setSelectedDate(res.serverDate);
+          setProofError(
+            `Clock mismatch: your device is ahead of the challenge timezone. Date adjusted to ${res.serverDate}. Tap "Get Proof Code" to proceed.`
+          );
+        } else {
+          setProofError(res.error || 'Failed to generate proof challenge.');
+        }
+        return;
+      }
+
+      setActiveProofChallenge(res.proofChallenge);
+      setProofError(null);
+      setDateChangeNotice(null);
+    } catch (err: any) {
+      setProofError(err?.message || 'Failed to generate proof challenge.');
+    } finally {
+      setIsGeneratingProof(false);
+    }
+  }
+
   function openSubmitModal(prefillDate?: string) {
     if (isGuest) {
-      showAuthModal('Account required to submit completion proof. Sign in to verify your progress!');
+      showAuthModal({
+        title: 'Sign In to Submit Proof',
+        description: 'Account required to submit completion proof. Sign in to verify your progress!',
+        onSuccess: () => setSubmitModalVisible(true),
+      });
       return;
     }
     const targetDate = prefillDate || todayDate;
     setSelectedDate(targetDate);
     setSubmissionNote('');
+    setTextEntry('');
+    setNumericValue('');
     setSubmitError(null);
     setSubmitSuccess(null);
+    setProofError(null);
+    setDateChangeNotice(null);
+
+    // If an existing proof challenge does not match target date or verifier, cancel and reset it
+    if (activeProofChallenge) {
+      if (
+        activeProofChallenge.completion_date !== targetDate ||
+        (selectedVerifierId && activeProofChallenge.verifier_id !== selectedVerifierId)
+      ) {
+        cancelProofChallengeSafe(activeProofChallenge);
+        setActiveProofChallenge(null);
+      }
+    }
 
     if (eligibleVerifiers.length > 0) {
       if (!selectedVerifierId || !eligibleVerifiers.some((v) => v.user_id === selectedVerifierId)) {
@@ -436,6 +651,50 @@ export default function ChallengeDetailScreen() {
   async function handleSubmitCompletion() {
     if (!challenge || !selectedVerifierId || !selectedDate || isSubmitting) return;
 
+    if (isProofCodeRequired) {
+      if (!effectiveProofChallenge) {
+        setSubmitError('Please generate a dynamic proof challenge code first.');
+        return;
+      }
+
+      if (isProofExpired) {
+        setSubmitError('This proof challenge has expired. Please tap "Get New Code" to regenerate.');
+        return;
+      }
+    }
+
+    if (proofMethod === 'text_log') {
+      const trimmed = textEntry.trim();
+      if (trimmed.length < 5 || trimmed.length > 500) {
+        setSubmitError('Written log must be between 5 and 500 characters.');
+        return;
+      }
+    }
+
+    if (proofMethod === 'numeric_entry') {
+      if (!numericValue.trim()) {
+        setSubmitError('Please enter a numeric completion value.');
+        return;
+      }
+      const val = Number(numericValue.trim());
+      if (!Number.isFinite(val) || val < 0 || val > 1000000) {
+        setSubmitError('Numeric value must be a valid number between 0 and 1,000,000.');
+        return;
+      }
+      if (challenge.proofConfig?.min_value !== undefined && val < challenge.proofConfig.min_value) {
+        setSubmitError(
+          `Value must be at least ${challenge.proofConfig.min_value}${challenge.proofConfig.unit ? ' ' + challenge.proofConfig.unit : ''}.`
+        );
+        return;
+      }
+      if (challenge.proofConfig?.max_value !== undefined && val > challenge.proofConfig.max_value) {
+        setSubmitError(
+          `Value must be at most ${challenge.proofConfig.max_value}${challenge.proofConfig.unit ? ' ' + challenge.proofConfig.unit : ''}.`
+        );
+        return;
+      }
+    }
+
     setIsSubmitting(true);
     setSubmitError(null);
     try {
@@ -443,17 +702,29 @@ export default function ChallengeDetailScreen() {
         challengeId: challenge.id,
         verifierId: selectedVerifierId,
         completionDate: selectedDate,
+        proofChallengeId: isProofCodeRequired ? (effectiveProofChallenge?.id ?? null) : null,
         submissionNote: submissionNote.trim() || undefined,
+        numericValue: proofMethod === 'numeric_entry' ? Number(numericValue.trim()) : undefined,
+        textEntry: proofMethod === 'text_log' ? textEntry.trim() : undefined,
       });
 
       if (!result.success || !result.completion) {
         setSubmitError(result.error || 'Failed to submit completion. Please try again.');
+        if (
+          result.error?.includes('expired') ||
+          result.error?.includes('consumed') ||
+          result.error?.includes('cancelled')
+        ) {
+          setActiveProofChallenge(null);
+        }
         return;
       }
 
-      setSubmitSuccess(result.completion);
-      setCopiedToast('Completion submitted for review!');
-      setTimeout(() => setCopiedToast(null), 3000);
+      const submittedCompletion = result.completion;
+      setActiveProofChallenge(null);
+      setDateChangeNotice(null);
+      setSubmitSuccess(submittedCompletion);
+      toast.success('Completion submitted for review!');
       await refreshVerificationData();
     } catch (err: any) {
       setSubmitError(err?.message || 'An unexpected error occurred during submission.');
@@ -471,6 +742,8 @@ export default function ChallengeDetailScreen() {
       completionDate: completion.completion_date,
       note: completion.submission_note || undefined,
       verifierName,
+      proofCode: completion.proof_code || undefined,
+      actionPrompt: completion.action_prompt || undefined,
     });
   }
 
@@ -500,8 +773,7 @@ export default function ChallengeDetailScreen() {
 
       setReassignModalVisible(false);
       setReassigningCompletion(null);
-      setCopiedToast('Verifier reassigned successfully!');
-      setTimeout(() => setCopiedToast(null), 3000);
+      toast.success('Verifier reassigned successfully!');
       await refreshVerificationData();
     } catch (err: any) {
       setReassignError(err?.message || 'Failed to reassign verifier.');
@@ -523,16 +795,13 @@ export default function ChallengeDetailScreen() {
         decision: 'approved',
       });
       if (!res.success) {
-        setCopiedToast(`Error: ${res.error || 'Failed to approve'}`);
-        setTimeout(() => setCopiedToast(null), 3500);
+        toast.error(sanitizeUserErrorMessage(res.error, 'Failed to approve'));
         return;
       }
-      setCopiedToast('Dare approved successfully!');
-      setTimeout(() => setCopiedToast(null), 3000);
+      toast.success('Dare approved successfully!');
       await Promise.all([refreshVerificationData(), refreshPendingReviews()]);
     } catch (err: any) {
-      setCopiedToast(`Error: ${err?.message || 'Error approving'}`);
-      setTimeout(() => setCopiedToast(null), 3500);
+      toast.error(sanitizeUserErrorMessage(err?.message, 'Error approving'));
     } finally {
       setIsReviewing(false);
     }
@@ -558,18 +827,15 @@ export default function ChallengeDetailScreen() {
         rejectionReason: inlineRejectionReason.trim() || undefined,
       });
       if (!res.success) {
-        setCopiedToast(`Error: ${res.error || 'Failed to reject'}`);
-        setTimeout(() => setCopiedToast(null), 3500);
+        toast.error(sanitizeUserErrorMessage(res.error, 'Failed to reject'));
         return;
       }
       setInlineRejectModalVisible(false);
       setRejectingCompletion(null);
-      setCopiedToast('Submission rejected.');
-      setTimeout(() => setCopiedToast(null), 3000);
+      toast.info('Submission rejected.');
       await Promise.all([refreshVerificationData(), refreshPendingReviews()]);
     } catch (err: any) {
-      setCopiedToast(`Error: ${err?.message || 'Error rejecting'}`);
-      setTimeout(() => setCopiedToast(null), 3500);
+      toast.error(sanitizeUserErrorMessage(err?.message, 'Error rejecting'));
     } finally {
       setIsReviewing(false);
     }
@@ -578,23 +844,26 @@ export default function ChallengeDetailScreen() {
   // Determine current submission state for UI
   const isOneTimeApproved = !isDaily && latestCompletion?.status === 'approved';
   const isOneTimePending = !isDaily && latestCompletion?.status === 'pending';
+  const isOneTimeRejected = !isDaily && latestCompletion?.status === 'rejected';
   const isTodayApproved = isDaily && todayCompletion?.status === 'approved';
   const isTodayPending = isDaily && todayCompletion?.status === 'pending';
   const isTodayRejected = isDaily && todayCompletion?.status === 'rejected';
+
+  const isTodayResubmissionPending = isTodayPending && isResubmission(todayCompletion);
+  const isOneTimeResubmissionPending = isOneTimePending && isResubmission(latestCompletion);
+
+  const todayGraceStatus = getResubmissionGraceStatus(todayCompletion?.reviewed_at, currentTimeMs);
+  const oneTimeGraceStatus = getResubmissionGraceStatus(latestCompletion?.reviewed_at, currentTimeMs);
+  const targetCompletionForDate = isDaily
+    ? userSubmissions.find((c) => c.completion_date === selectedDate)
+    : latestCompletion;
+  const isModalResubmission = targetCompletionForDate?.status === 'rejected';
+  const modalGraceStatus = getResubmissionGraceStatus(targetCompletionForDate?.reviewed_at, currentTimeMs);
 
   return (
     <View style={styles.root}>
       <StatusBar style="light" />
 
-      {/* Floating feedback toast */}
-      {copiedToast ? (
-        <View style={[styles.toastContainer, { top: insets.top + DD_SPACING.sm }]}>
-          <DDIcon name="check-circle" size={16} color={DD_COLORS.lime} weight="fill" />
-          <DDText variant="caption" color="lime" bold style={styles.toastText}>
-            {copiedToast}
-          </DDText>
-        </View>
-      ) : null}
 
       {/* Header navigation bar */}
       <View style={[styles.navBar, { paddingTop: insets.top + DD_SPACING.xs }]}>
@@ -656,6 +925,36 @@ export default function ChallengeDetailScreen() {
                   color={isDaily ? 'lime' : 'purple'}
                   style={styles.typePillText}>
                   {isDaily ? 'Daily Dare' : 'One-Time Dare'}
+                </DDText>
+              </View>
+
+              <View style={styles.proofMethodPill}>
+                <DDIcon
+                  name={
+                    proofMethod === 'physical_action'
+                      ? 'shield-check'
+                      : proofMethod === 'photo_code'
+                        ? 'sparkle'
+                        : proofMethod === 'numeric_entry'
+                          ? 'target'
+                          : proofMethod === 'text_log'
+                            ? 'compass'
+                            : 'verify'
+                  }
+                  size={12}
+                  color={DD_COLORS.info}
+                  weight="bold"
+                />
+                <DDText variant="caption" customColor={DD_COLORS.info} style={styles.proofMethodPillText}>
+                  {proofMethod === 'physical_action'
+                    ? 'Gesture + Code'
+                    : proofMethod === 'photo_code'
+                      ? 'Photo + Code'
+                      : proofMethod === 'numeric_entry'
+                        ? 'Number Entry'
+                        : proofMethod === 'text_log'
+                          ? 'Written Log'
+                          : 'Peer Vouch'}
                 </DDText>
               </View>
             </View>
@@ -784,7 +1083,15 @@ export default function ChallengeDetailScreen() {
             <View style={styles.cardHeaderRow}>
               <View style={styles.verificationBadgesRow}>
                 <DDBadge label="Peer Verification" variant="purple" size="sm" icon="verify" />
-                <DDBadge label="WhatsApp Proof" variant="lime" size="sm" icon="share" />
+                {isProofCodeRequired ? (
+                  <DDBadge label="WhatsApp Proof" variant="lime" size="sm" icon="share" />
+                ) : proofMethod === 'numeric_entry' ? (
+                  <DDBadge label="Numeric Metric" variant="lime" size="sm" icon="target" />
+                ) : proofMethod === 'text_log' ? (
+                  <DDBadge label="Written Log" variant="lime" size="sm" icon="compass" />
+                ) : (
+                  <DDBadge label="Peer Vouch" variant="lime" size="sm" icon="check" />
+                )}
               </View>
               <DDText variant="h3" color="primary" style={styles.cardMainTitle}>
                 Submit Dare Proof
@@ -792,7 +1099,9 @@ export default function ChallengeDetailScreen() {
             </View>
 
             <DDText variant="bodySm" color="secondary" style={styles.cardDescription}>
-              Submissions require peer verification. Submit completion below, then send your proof photo or video to your assigned verifier via WhatsApp.
+              {isProofCodeRequired
+                ? 'Submissions require peer verification. Submit completion below, then send your proof photo or video to your assigned verifier via WhatsApp.'
+                : 'Submissions require peer verification. Submit your completion details below for your assigned verifier to review.'}
             </DDText>
 
             {/* Daily Challenge Today Status Callouts */}
@@ -811,16 +1120,38 @@ export default function ChallengeDetailScreen() {
             )}
 
             {isDaily && isTodayPending && (
-              <View style={[styles.statusCallout, styles.statusCalloutPending]}>
-                <DDIcon name="clock" size={20} color={DD_COLORS.warning} weight="bold" />
+              <View
+                style={[
+                  styles.statusCallout,
+                  isTodayResubmissionPending ? styles.statusCalloutResubmission : styles.statusCalloutPending,
+                ]}>
+                <DDIcon
+                  name={isTodayResubmissionPending ? 'refresh' : 'clock'}
+                  size={20}
+                  color={isTodayResubmissionPending ? DD_COLORS.coral : DD_COLORS.warning}
+                  weight="bold"
+                />
                 <View style={styles.calloutTexts}>
-                  <DDText variant="label" color="warning" bold>
-                    Today is Pending Verification
+                  <DDText
+                    variant="label"
+                    color={isTodayResubmissionPending ? 'coral' : 'warning'}
+                    bold>
+                    {isTodayResubmissionPending
+                      ? 'Today’s Resubmission Pending Review'
+                      : 'Today is Pending Verification'}
                   </DDText>
                   <DDText variant="caption" color="secondary">
                     Submitted for {todayDate}. Waiting for verifier approval.
                   </DDText>
-                  {todayCompletion && (
+                  {isTodayResubmissionPending && todayCompletion?.last_rejection_reason ? (
+                    <DDText variant="caption" color="coral">
+                      Previous feedback: &quot;{todayCompletion.last_rejection_reason}&quot;
+                      {todayCompletion.last_reviewed_at
+                        ? ` (${formatReviewedAt(todayCompletion.last_reviewed_at)})`
+                        : ''}
+                    </DDText>
+                  ) : null}
+                  {todayCompletion && (todayCompletion.proof_code || isProofCodeRequired) && (
                     <DDButton
                       title="Send WhatsApp Proof"
                       variant="secondary"
@@ -839,10 +1170,27 @@ export default function ChallengeDetailScreen() {
                 <DDIcon name="warning" size={20} color={DD_COLORS.danger} weight="bold" />
                 <View style={styles.calloutTexts}>
                   <DDText variant="label" color="danger" bold>
-                    Submission Needs Resubmission
+                    {todayGraceStatus.isUnverifiable
+                      ? 'Submission Rejected (Timestamp Unverified)'
+                      : todayGraceStatus.isExpired
+                        ? 'Submission Rejected (Window Expired)'
+                        : 'Submission Needs Resubmission'}
                   </DDText>
                   <DDText variant="caption" color="secondary">
                     Reason: {todayCompletion?.rejection_reason || 'Proof was not approved.'}
+                    {todayCompletion?.reviewed_at
+                      ? ` • Reviewed ${formatReviewedAt(todayCompletion.reviewed_at)}`
+                      : ''}
+                  </DDText>
+                  <DDText
+                    variant="caption"
+                    color={todayGraceStatus.isExpired ? 'danger' : 'warning'}
+                    bold>
+                    {todayGraceStatus.isUnverifiable
+                      ? 'The rejection timestamp cannot be verified.'
+                      : todayGraceStatus.isExpired
+                        ? `48-hour resubmission window expired on ${todayGraceStatus.formattedDeadline}`
+                        : `48h window active • ${todayGraceStatus.label} (until ${todayGraceStatus.formattedDeadline})`}
                   </DDText>
                 </View>
               </View>
@@ -864,16 +1212,38 @@ export default function ChallengeDetailScreen() {
             )}
 
             {!isDaily && isOneTimePending && (
-              <View style={[styles.statusCallout, styles.statusCalloutPending]}>
-                <DDIcon name="clock" size={20} color={DD_COLORS.warning} weight="bold" />
+              <View
+                style={[
+                  styles.statusCallout,
+                  isOneTimeResubmissionPending ? styles.statusCalloutResubmission : styles.statusCalloutPending,
+                ]}>
+                <DDIcon
+                  name={isOneTimeResubmissionPending ? 'refresh' : 'clock'}
+                  size={20}
+                  color={isOneTimeResubmissionPending ? DD_COLORS.coral : DD_COLORS.warning}
+                  weight="bold"
+                />
                 <View style={styles.calloutTexts}>
-                  <DDText variant="label" color="warning" bold>
-                    Dare Submission Pending Review
+                  <DDText
+                    variant="label"
+                    color={isOneTimeResubmissionPending ? 'coral' : 'warning'}
+                    bold>
+                    {isOneTimeResubmissionPending
+                      ? 'Dare Resubmission Pending Review'
+                      : 'Dare Submission Pending Review'}
                   </DDText>
                   <DDText variant="caption" color="secondary">
                     Your completion is currently awaiting review by your verifier.
                   </DDText>
-                  {latestCompletion && (
+                  {isOneTimeResubmissionPending && latestCompletion?.last_rejection_reason ? (
+                    <DDText variant="caption" color="coral">
+                      Previous feedback: &quot;{latestCompletion.last_rejection_reason}&quot;
+                      {latestCompletion.last_reviewed_at
+                        ? ` (${formatReviewedAt(latestCompletion.last_reviewed_at)})`
+                        : ''}
+                    </DDText>
+                  ) : null}
+                  {latestCompletion && (latestCompletion.proof_code || isProofCodeRequired) && (
                     <DDButton
                       title="Send WhatsApp Proof"
                       variant="secondary"
@@ -887,19 +1257,75 @@ export default function ChallengeDetailScreen() {
               </View>
             )}
 
+            {!isDaily && isOneTimeRejected && (
+              <View style={[styles.statusCallout, styles.statusCalloutRejected]}>
+                <DDIcon name="warning" size={20} color={DD_COLORS.danger} weight="bold" />
+                <View style={styles.calloutTexts}>
+                  <DDText variant="label" color="danger" bold>
+                    {oneTimeGraceStatus.isUnverifiable
+                      ? 'Dare Rejected (Timestamp Unverified)'
+                      : oneTimeGraceStatus.isExpired
+                        ? 'Dare Rejected (Window Expired)'
+                        : 'Dare Needs Resubmission'}
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
+                    Reason: {latestCompletion?.rejection_reason || 'Proof was not approved.'}
+                    {latestCompletion?.reviewed_at
+                      ? ` • Reviewed ${formatReviewedAt(latestCompletion.reviewed_at)}`
+                      : ''}
+                  </DDText>
+                  <DDText
+                    variant="caption"
+                    color={oneTimeGraceStatus.isExpired ? 'danger' : 'warning'}
+                    bold>
+                    {oneTimeGraceStatus.isUnverifiable
+                      ? 'The rejection timestamp cannot be verified. Resubmission is unavailable.'
+                      : oneTimeGraceStatus.isExpired
+                        ? `48-hour resubmission window expired on ${oneTimeGraceStatus.formattedDeadline}`
+                        : `48h window active • ${oneTimeGraceStatus.label} (until ${oneTimeGraceStatus.formattedDeadline})`}
+                  </DDText>
+                </View>
+              </View>
+            )}
+
             {/* Main Submit Action Buttons */}
             {!isOneTimeApproved && !isOneTimePending && (
               <View style={styles.submitActionBox}>
                 <DDButton
                   title={
-                    isTodayApproved
-                      ? 'Submit Another Day'
-                      : isTodayRejected
-                        ? 'Resubmit Today’s Completion'
+                    isDaily
+                      ? isTodayApproved
+                        ? 'Submit Another Day'
+                        : isTodayRejected
+                          ? todayGraceStatus.isExpired
+                            ? todayGraceStatus.isUnverifiable
+                              ? 'Timestamp Unverified'
+                              : 'Resubmission Window Expired'
+                            : 'Resubmit Today’s Completion'
+                          : 'Submit Completion'
+                      : isOneTimeRejected
+                        ? oneTimeGraceStatus.isExpired
+                          ? oneTimeGraceStatus.isUnverifiable
+                            ? 'Timestamp Unverified'
+                            : 'Resubmission Window Expired'
+                          : 'Resubmit Dare'
                         : 'Submit Completion'
                   }
-                  variant="primary"
-                  iconLeft="plus"
+                  variant={
+                    (isDaily && isTodayRejected && todayGraceStatus.isExpired) ||
+                    (!isDaily && isOneTimeRejected && oneTimeGraceStatus.isExpired)
+                      ? 'outline'
+                      : 'primary'
+                  }
+                  disabled={
+                    (isDaily && isTodayRejected && todayGraceStatus.isExpired) ||
+                    (!isDaily && isOneTimeRejected && oneTimeGraceStatus.isExpired)
+                  }
+                  iconLeft={
+                    (isDaily && isTodayRejected) || (!isDaily && isOneTimeRejected)
+                      ? 'refresh'
+                      : 'plus'
+                  }
                   onPress={() => openSubmitModal()}
                   fullWidth
                 />
@@ -955,13 +1381,45 @@ export default function ChallengeDetailScreen() {
                           {item.completion_date} • {formatSubmittedAt(item.submitted_at)}
                         </DDText>
                       </View>
-                      <DDBadge label="Pending" variant="warning" size="sm" icon="clock" />
+                      <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+                        {isResubmission(item) && (
+                          <DDBadge label="Resubmission" variant="coral" size="sm" icon="refresh" />
+                        )}
+                        <DDBadge label="Pending" variant="warning" size="sm" icon="clock" />
+                      </View>
                     </View>
 
                     {item.submission_note ? (
                       <View style={styles.reviewNoteBox}>
                         <DDText variant="caption" color="secondary" style={styles.reviewNoteText}>
                           &quot;{item.submission_note}&quot;
+                        </DDText>
+                      </View>
+                    ) : null}
+
+                    {isResubmission(item) && item.last_rejection_reason ? (
+                      <View style={styles.reviewPrevFeedbackBox}>
+                        <DDText variant="caption" color="coral" numberOfLines={2}>
+                          Previous feedback: &quot;{item.last_rejection_reason}&quot;
+                          {item.last_reviewed_at ? ` (${formatReviewedAt(item.last_reviewed_at)})` : ''}
+                        </DDText>
+                      </View>
+                    ) : null}
+
+                    {item.numeric_value !== null && item.numeric_value !== undefined ? (
+                      <View style={styles.reviewProofBox}>
+                        <DDIcon name="target" size={13} color={DD_COLORS.lime} weight="bold" />
+                        <DDText variant="caption" color="lime" bold style={{ marginLeft: 4 }}>
+                          Recorded Metric: {item.numeric_value} {challenge?.proofConfig?.unit || ''}
+                        </DDText>
+                      </View>
+                    ) : null}
+
+                    {item.text_entry ? (
+                      <View style={styles.reviewProofBox}>
+                        <DDIcon name="compass" size={13} color={DD_COLORS.textMuted} weight="bold" />
+                        <DDText variant="caption" color="secondary" style={{ marginLeft: 4 }} numberOfLines={3}>
+                          &quot;{item.text_entry}&quot;
                         </DDText>
                       </View>
                     ) : null}
@@ -1046,11 +1504,28 @@ export default function ChallengeDetailScreen() {
                         <DDBadge label="Approved" variant="success" size="sm" icon="check-circle" />
                       )}
                       {item.status === 'pending' && (
-                        <DDBadge label="Pending" variant="warning" size="sm" icon="clock" />
+                        <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+                          {isResubmission(item) && (
+                            <DDBadge label="Resubmitted" variant="coral" size="sm" icon="refresh" />
+                          )}
+                          <DDBadge label="Pending" variant="warning" size="sm" icon="clock" />
+                        </View>
                       )}
-                      {item.status === 'rejected' && (
-                        <DDBadge label="Rejected" variant="danger" size="sm" icon="x-circle" />
-                      )}
+                      {item.status === 'rejected' && (() => {
+                        const grace = getResubmissionGraceStatus(item.reviewed_at, currentTimeMs);
+                        return (
+                          <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+                            <DDBadge label="Rejected" variant="danger" size="sm" icon="x-circle" />
+                            {grace.isUnverifiable ? (
+                              <DDBadge label="Unverifiable" variant="neutral" size="sm" icon="x-circle" />
+                            ) : grace.isExpired ? (
+                              <DDBadge label="Expired" variant="neutral" size="sm" icon="clock" />
+                            ) : (
+                              <DDBadge label={grace.label} variant="warning" size="sm" icon="clock" />
+                            )}
+                          </View>
+                        );
+                      })()}
                     </View>
 
                     {item.submission_note ? (
@@ -1062,6 +1537,28 @@ export default function ChallengeDetailScreen() {
                     {item.rejection_reason && item.status === 'rejected' ? (
                       <DDText variant="caption" color="danger" style={styles.rejectionReasonText}>
                         Feedback: {item.rejection_reason}
+                        {item.reviewed_at
+                          ? ` • Reviewed ${formatReviewedAt(item.reviewed_at)}`
+                          : ' • Rejection timestamp cannot be verified'}
+                      </DDText>
+                    ) : null}
+
+                    {item.status === 'pending' && isResubmission(item) && item.last_rejection_reason ? (
+                      <DDText variant="caption" color="coral" style={styles.rejectionReasonText}>
+                        Previous Feedback: {item.last_rejection_reason}
+                        {item.last_reviewed_at ? ` • Reviewed ${formatReviewedAt(item.last_reviewed_at)}` : ''}
+                      </DDText>
+                    ) : null}
+
+                    {item.numeric_value !== null && item.numeric_value !== undefined ? (
+                      <DDText variant="caption" color="lime" style={styles.historyMetricText}>
+                        Metric: {item.numeric_value} {challenge?.proofConfig?.unit || ''}
+                      </DDText>
+                    ) : null}
+
+                    {item.text_entry ? (
+                      <DDText variant="caption" color="secondary" style={styles.historyLogText} numberOfLines={2}>
+                        Log: &quot;{item.text_entry}&quot;
                       </DDText>
                     ) : null}
 
@@ -1069,13 +1566,15 @@ export default function ChallengeDetailScreen() {
                     <View style={styles.historyActionsRow}>
                       {item.status === 'pending' && (
                         <>
-                          <DDButton
-                            title="WhatsApp Proof"
-                            variant="secondary"
-                            size="sm"
-                            iconLeft="share"
-                            onPress={() => handleSendWhatsAppProof(item)}
-                          />
+                          {(item.proof_code || isProofCodeRequired) && (
+                            <DDButton
+                              title="WhatsApp Proof"
+                              variant="secondary"
+                              size="sm"
+                              iconLeft="share"
+                              onPress={() => handleSendWhatsAppProof(item)}
+                            />
+                          )}
                           <DDButton
                             title="Reassign Verifier"
                             variant="outline"
@@ -1086,15 +1585,40 @@ export default function ChallengeDetailScreen() {
                         </>
                       )}
 
-                      {item.status === 'rejected' && (
-                        <DDButton
-                          title="Resubmit for this date"
-                          variant="primary"
-                          size="sm"
-                          iconLeft="refresh"
-                          onPress={() => openSubmitModal(item.completion_date)}
-                        />
-                      )}
+                      {item.status === 'rejected' && (() => {
+                        const grace = getResubmissionGraceStatus(item.reviewed_at, currentTimeMs);
+                        if (grace.isUnverifiable) {
+                          return (
+                            <DDButton
+                              title="Timestamp Unverified"
+                              variant="outline"
+                              size="sm"
+                              disabled
+                              style={{ opacity: 0.5 }}
+                            />
+                          );
+                        }
+                        if (grace.isExpired) {
+                          return (
+                            <DDButton
+                              title="Resubmission Expired (48h)"
+                              variant="outline"
+                              size="sm"
+                              disabled
+                              style={{ opacity: 0.5 }}
+                            />
+                          );
+                        }
+                        return (
+                          <DDButton
+                            title="Resubmit for this date"
+                            variant="primary"
+                            size="sm"
+                            iconLeft="refresh"
+                            onPress={() => openSubmitModal(item.completion_date)}
+                          />
+                        );
+                      })()}
                     </View>
                   </View>
                 );
@@ -1199,7 +1723,9 @@ export default function ChallengeDetailScreen() {
             {[
               'Commit to the duration before joining',
               'Submit completion daily and assign a peer verifier',
-              'Share your photo or video proof directly with your verifier via WhatsApp',
+              isProofCodeRequired
+                ? 'Share your photo or video proof directly with your verifier via WhatsApp'
+                : 'Submit your completion for your assigned verifier to review in the app',
               'Only verifier-approved submissions count toward your streak and badge',
             ].map((rule, i) => (
               <View key={i} style={styles.ruleItem}>
@@ -1257,7 +1783,7 @@ export default function ChallengeDetailScreen() {
         visible={submitModalVisible}
         animationType="slide"
         transparent={true}
-        onRequestClose={() => setSubmitModalVisible(false)}>
+        onRequestClose={closeSubmitModal}>
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={styles.modalOverlay}>
@@ -1266,14 +1792,20 @@ export default function ChallengeDetailScreen() {
             <View style={styles.modalHeaderRow}>
               <View style={styles.modalHeaderTexts}>
                 <DDText variant="h3" color="primary">
-                  Submit Completion
+                  {isModalResubmission
+                    ? isDaily
+                      ? 'Resubmit Completion'
+                      : 'Resubmit Dare'
+                    : isDaily
+                      ? 'Submit Completion'
+                      : 'Submit Dare'}
                 </DDText>
                 <DDText variant="caption" color="muted" numberOfLines={1}>
                   {challenge.title}
                 </DDText>
               </View>
               <Pressable
-                onPress={() => setSubmitModalVisible(false)}
+                onPress={closeSubmitModal}
                 hitSlop={8}
                 style={styles.modalCloseBtn}
                 accessibilityRole="button"
@@ -1295,32 +1827,139 @@ export default function ChallengeDetailScreen() {
                   Your submission for {submitSuccess.completion_date} is now pending peer review.
                 </DDText>
 
-                <View style={styles.successProofBox}>
-                  <DDIcon name="info" size={16} color={DD_COLORS.info} weight="bold" />
-                  <DDText variant="caption" color="secondary" style={styles.successProofNotice}>
-                    Proof photos and videos are not uploaded to our servers. Send your proof directly to your assigned verifier via WhatsApp!
-                  </DDText>
-                </View>
+                {submitSuccess.numeric_value !== null && submitSuccess.numeric_value !== undefined ? (
+                  <View style={styles.successProofDetailsBox}>
+                    <View style={styles.proofCodeRow}>
+                      <DDText variant="caption" color="muted" bold>
+                        RECORDED METRIC
+                      </DDText>
+                      <View style={styles.proofCodeBadge}>
+                        <DDText variant="title" color="lime" bold style={styles.proofCodeText}>
+                          {submitSuccess.numeric_value} {challenge.proofConfig?.unit || ''}
+                        </DDText>
+                      </View>
+                    </View>
+                  </View>
+                ) : null}
 
-                <DDButton
-                  title="Share Proof on WhatsApp"
-                  variant="primary"
-                  iconLeft="share"
-                  onPress={() => handleSendWhatsAppProof(submitSuccess)}
-                  fullWidth
-                  style={styles.modalSuccessBtn}
-                />
+                {submitSuccess.text_entry ? (
+                  <View style={styles.successProofDetailsBox}>
+                    <DDText variant="caption" color="muted" bold>
+                      SUBMITTED LOG
+                    </DDText>
+                    <DDText variant="bodySm" color="primary" style={{ marginTop: 4 }}>
+                      &quot;{submitSuccess.text_entry}&quot;
+                    </DDText>
+                  </View>
+                ) : null}
+
+                {submitSuccess.proof_code ? (
+                  <View style={styles.successProofDetailsBox}>
+                    <View style={styles.proofCodeRow}>
+                      <DDText variant="caption" color="muted" bold>
+                        YOUR PROOF CODE
+                      </DDText>
+                      <View style={styles.proofCodeBadge}>
+                        <DDText variant="title" color="lime" bold style={styles.proofCodeText}>
+                          {submitSuccess.proof_code}
+                        </DDText>
+                      </View>
+                    </View>
+                    {submitSuccess.action_prompt && submitSuccess.action_prompt_id !== 'write_code_on_paper' ? (
+                      <View style={styles.proofActionRow}>
+                        <DDText variant="caption" color="muted" bold>
+                          ACTION
+                        </DDText>
+                        <DDText
+                          variant="bodySm"
+                          color="primary"
+                          bold
+                          numberOfLines={2}
+                          style={{ flex: 1, textAlign: 'right', marginLeft: 8 }}>
+                          {submitSuccess.action_prompt}
+                        </DDText>
+                      </View>
+                    ) : null}
+                  </View>
+                ) : null}
+
+                {isProofCodeRequired ? (
+                  <>
+                    <View style={styles.successProofBox}>
+                      <DDIcon name="info" size={16} color={DD_COLORS.info} weight="bold" />
+                      <DDText variant="caption" color="secondary" style={styles.successProofNotice}>
+                        Proof photos and videos are not uploaded to our servers. Send your proof directly to your assigned verifier via WhatsApp!
+                      </DDText>
+                    </View>
+
+                    <DDButton
+                      title="Share Proof on WhatsApp"
+                      variant="primary"
+                      iconLeft="share"
+                      onPress={() => handleSendWhatsAppProof(submitSuccess)}
+                      fullWidth
+                      style={styles.modalSuccessBtn}
+                    />
+                  </>
+                ) : (
+                  <View style={styles.successProofBox}>
+                    <DDIcon name="check-circle" size={16} color={DD_COLORS.lime} weight="bold" />
+                    <DDText variant="caption" color="secondary" style={styles.successProofNotice}>
+                      Your submission has been sent to your assigned verifier for review. Once verified, your progress and streak will update!
+                    </DDText>
+                  </View>
+                )}
 
                 <DDButton
                   title="Done"
                   variant="secondary"
-                  onPress={() => setSubmitModalVisible(false)}
+                  onPress={closeSubmitModal}
                   fullWidth
+                  style={{ marginTop: isProofCodeRequired ? 0 : 8 }}
                 />
               </View>
             ) : (
               /* Form State */
               <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.formScroll}>
+                {isModalResubmission && (
+                  <View style={styles.modalResubmitCard}>
+                    <View style={styles.modalResubmitHeader}>
+                      <DDIcon name="warning" size={16} color={DD_COLORS.coral} weight="bold" />
+                      <DDText variant="label" color="coral" bold style={{ marginLeft: 6 }}>
+                        {isDaily ? `Resubmitting for ${selectedDate}` : 'Resubmitting Dare'}
+                      </DDText>
+                    </View>
+                    {targetCompletionForDate?.rejection_reason ? (
+                      <View style={styles.modalPrevFeedbackBox}>
+                        <DDText variant="caption" color="muted" bold>
+                          PREVIOUS VERIFIER FEEDBACK
+                        </DDText>
+                        <DDText variant="bodySm" color="primary" style={{ marginTop: 2 }}>
+                          &quot;{targetCompletionForDate.rejection_reason}&quot;
+                        </DDText>
+                      </View>
+                    ) : null}
+                    <View style={styles.modalGraceRow}>
+                      <DDIcon
+                        name="clock"
+                        size={12}
+                        color={modalGraceStatus.isExpired ? DD_COLORS.danger : DD_COLORS.warning}
+                        weight="bold"
+                      />
+                      <DDText
+                        variant="caption"
+                        color={modalGraceStatus.isExpired ? 'danger' : 'secondary'}
+                        style={{ marginLeft: 4 }}>
+                        {modalGraceStatus.isUnverifiable
+                          ? 'The rejection timestamp cannot be verified. Resubmission is unavailable.'
+                          : modalGraceStatus.isExpired
+                            ? `Resubmission window expired on ${modalGraceStatus.formattedDeadline}`
+                            : `48h grace window: ${modalGraceStatus.label} (until ${modalGraceStatus.formattedDeadline})`}
+                      </DDText>
+                    </View>
+                  </View>
+                )}
+
                 {/* Date Selection (Daily challenge) */}
                 {isDaily ? (
                   <View style={styles.formGroup}>
@@ -1329,7 +1968,7 @@ export default function ChallengeDetailScreen() {
                     </DDText>
                     <View style={styles.dateSelectorRow}>
                       <Pressable
-                        onPress={() => setSelectedDate(todayDate)}
+                        onPress={() => handleSelectDate(todayDate)}
                         style={[
                           styles.dateOption,
                           selectedDate === todayDate && styles.dateOptionActive,
@@ -1349,7 +1988,7 @@ export default function ChallengeDetailScreen() {
                       </Pressable>
 
                       <Pressable
-                        onPress={() => setSelectedDate(yesterdayDate)}
+                        onPress={() => handleSelectDate(yesterdayDate)}
                         style={[
                           styles.dateOption,
                           selectedDate === yesterdayDate && styles.dateOptionActive,
@@ -1367,9 +2006,32 @@ export default function ChallengeDetailScreen() {
                           Yesterday ({yesterdayDate})
                         </DDText>
                       </Pressable>
+
+                      {selectedDate !== todayDate && selectedDate !== yesterdayDate && (
+                        <View style={[styles.dateOption, styles.dateOptionActive]}>
+                          <DDIcon name="refresh" size={14} color={DD_COLORS.lime} weight="bold" />
+                          <DDText variant="caption" bold color="lime">
+                            {selectedDate} (Resubmission)
+                          </DDText>
+                        </View>
+                      )}
                     </View>
+
+                    {dateChangeNotice ? (
+                      <View style={styles.dateChangeNoticeBox}>
+                        <DDIcon name="info" size={14} color={DD_COLORS.warning} weight="bold" />
+                        <DDText variant="caption" color="warning" bold style={{ marginLeft: 6, flex: 1 }}>
+                          {dateChangeNotice}
+                        </DDText>
+                      </View>
+                    ) : null}
+
                     <DDText variant="caption" color="muted" style={styles.formHint}>
-                      Submissions accepted for today and yesterday in timezone ({challenge.timezone || 'UTC'}).
+                      {isModalResubmission
+                        ? modalGraceStatus.isUnverifiable
+                          ? `Resubmission for ${selectedDate} is unavailable because the rejection timestamp cannot be verified.`
+                          : `Resubmitting for ${selectedDate}. 48-hour grace period active.`
+                        : `Submissions accepted for today and yesterday in challenge timezone (${challenge.timezone || 'UTC'}).`}
                     </DDText>
                   </View>
                 ) : (
@@ -1380,7 +2042,7 @@ export default function ChallengeDetailScreen() {
                     <View style={styles.staticDateBox}>
                       <DDIcon name="calendar" size={14} color={DD_COLORS.lime} weight="bold" />
                       <DDText variant="caption" color="lime" bold>
-                        Today: {todayDate}
+                        {selectedDate === todayDate ? `Today: ${todayDate}` : `Dare Date: ${selectedDate}`}
                       </DDText>
                     </View>
                   </View>
@@ -1403,7 +2065,7 @@ export default function ChallengeDetailScreen() {
                         size="sm"
                         iconLeft="user-plus"
                         onPress={() => {
-                          setSubmitModalVisible(false);
+                          closeSubmitModal();
                           handleShare();
                         }}
                       />
@@ -1413,7 +2075,7 @@ export default function ChallengeDetailScreen() {
                       {eligibleVerifiers.map((v) => (
                         <Pressable
                           key={v.user_id}
-                          onPress={() => setSelectedVerifierId(v.user_id)}
+                          onPress={() => handleSelectVerifier(v.user_id)}
                           style={[
                             styles.verifierOption,
                             selectedVerifierId === v.user_id && styles.verifierOptionActive,
@@ -1444,6 +2106,214 @@ export default function ChallengeDetailScreen() {
                   )}
                 </View>
 
+                {/* Proof Input Section based on proofMethod */}
+                {proofMethod === 'numeric_entry' && (
+                  <View style={styles.formGroup}>
+                    <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                      Recorded Value {challenge.proofConfig?.unit ? `(${challenge.proofConfig.unit})` : ''}
+                    </DDText>
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder={
+                        challenge.proofConfig?.unit
+                          ? `e.g. 50 ${challenge.proofConfig.unit}`
+                          : 'e.g. 25'
+                      }
+                      placeholderTextColor={DD_COLORS.textMuted}
+                      value={numericValue}
+                      onChangeText={setNumericValue}
+                      keyboardType="numeric"
+                    />
+                    {(challenge.proofConfig?.min_value !== undefined ||
+                      challenge.proofConfig?.max_value !== undefined) && (
+                      <DDText variant="caption" color="muted" style={styles.formHint}>
+                        Allowed range:{' '}
+                        {challenge.proofConfig.min_value !== undefined
+                          ? `min ${challenge.proofConfig.min_value}`
+                          : ''}
+                        {challenge.proofConfig.min_value !== undefined &&
+                        challenge.proofConfig.max_value !== undefined
+                          ? ', '
+                          : ''}
+                        {challenge.proofConfig.max_value !== undefined
+                          ? `max ${challenge.proofConfig.max_value}`
+                          : ''}
+                        {challenge.proofConfig.unit ? ` ${challenge.proofConfig.unit}` : ''}
+                      </DDText>
+                    )}
+                  </View>
+                )}
+
+                {proofMethod === 'text_log' && (
+                  <View style={styles.formGroup}>
+                    <View style={styles.sectionHeaderRow}>
+                      <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                        Written Completion Log
+                      </DDText>
+                      <DDText
+                        variant="caption"
+                        color={
+                          textEntry.trim().length >= 5 && textEntry.trim().length <= 500
+                            ? 'muted'
+                            : 'warning'
+                        }>
+                        {textEntry.trim().length}/500 chars (min 5)
+                      </DDText>
+                    </View>
+                    <TextInput
+                      style={[styles.textInput, { minHeight: 90, textAlignVertical: 'top' }]}
+                      placeholder="Describe what you completed, lessons learned, or details..."
+                      placeholderTextColor={DD_COLORS.textMuted}
+                      value={textEntry}
+                      onChangeText={setTextEntry}
+                      multiline
+                      numberOfLines={4}
+                      maxLength={500}
+                    />
+                    <DDText variant="caption" color="muted" style={styles.formHint}>
+                      Write a brief log of your accomplishment (5–500 characters) for your verifier to read.
+                    </DDText>
+                  </View>
+                )}
+
+                {proofMethod === 'peer_confirmation' && (
+                  <View style={styles.formGroup}>
+                    <View style={styles.peerConfirmationCard}>
+                      <DDIcon name="verify" size={20} color={DD_COLORS.lime} weight="fill" />
+                      <View style={{ flex: 1, marginLeft: 10 }}>
+                        <DDText variant="label" color="primary" bold>
+                          Peer Honor Verification
+                        </DDText>
+                        <DDText variant="caption" color="secondary" style={{ marginTop: 2 }}>
+                          No photo, video, or code required. Your assigned verifier will vouch for your completion based on direct observation or peer trust.
+                        </DDText>
+                      </View>
+                    </View>
+                  </View>
+                )}
+
+                {isProofCodeRequired && (
+                  <View style={styles.formGroup}>
+                    <View style={styles.sectionHeaderRow}>
+                      <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                        {proofMethod === 'photo_code' ? 'Photo Proof Code' : 'Dynamic Proof Challenge'}
+                      </DDText>
+                      {effectiveProofChallenge && !isProofExpired ? (
+                        <Pressable
+                          onPress={handleGenerateProof}
+                          disabled={isGeneratingProof || isSubmitting}
+                          hitSlop={8}>
+                          <DDText variant="caption" color="lime" bold>
+                            {isGeneratingProof ? 'Regenerating...' : 'Get New Code'}
+                          </DDText>
+                        </Pressable>
+                      ) : null}
+                    </View>
+
+                    {!effectiveProofChallenge ? (
+                      <View style={styles.generateProofPromptBox}>
+                        <View style={styles.generateProofHeaderRow}>
+                          <DDIcon name="shield-check" size={18} color={DD_COLORS.lime} weight="bold" />
+                          <DDText variant="bodySm" color="primary" bold style={{ flex: 1, marginLeft: 8 }}>
+                            {proofMethod === 'photo_code'
+                              ? 'Step 1: Generate Proof Code'
+                              : 'Step 1: Generate Proof Code & Gesture'}
+                          </DDText>
+                        </View>
+                        <DDText variant="caption" color="secondary" style={styles.generateProofDesc}>
+                          {proofMethod === 'photo_code'
+                            ? 'To prevent recycled photos, DareDrop generates a fresh 4-character code. Write this code on paper before taking your photo.'
+                            : 'To prevent recycled photos, DareDrop requires a unique 4-character code and gesture. Generate your code now before capturing proof.'}
+                        </DDText>
+
+                        {proofError ? (
+                          <View style={styles.proofErrorBox}>
+                            <DDIcon name="warning" size={14} color={DD_COLORS.danger} weight="bold" />
+                            <DDText variant="caption" color="danger" style={{ flex: 1, marginLeft: 6 }}>
+                              {proofError}
+                            </DDText>
+                          </View>
+                        ) : null}
+
+                        <DDButton
+                          title={isGeneratingProof ? 'Generating Code...' : 'Generate Proof Challenge'}
+                          variant="primary"
+                          iconLeft="sparkle"
+                          loading={isGeneratingProof}
+                          disabled={isGeneratingProof || !selectedVerifierId || eligibleVerifiers.length === 0}
+                          onPress={handleGenerateProof}
+                          fullWidth
+                          style={styles.generateProofBtn}
+                        />
+                      </View>
+                    ) : (
+                      <View style={[styles.proofCard, isProofExpired && styles.proofCardExpired]}>
+                        {isProofExpired ? (
+                          <View style={styles.proofExpiredBanner}>
+                            <DDIcon name="warning" size={16} color={DD_COLORS.danger} weight="bold" />
+                            <DDText variant="caption" color="danger" bold style={{ flex: 1, marginLeft: 6 }}>
+                              Proof challenge expired (45m TTL). Please generate a new code.
+                            </DDText>
+                          </View>
+                        ) : (
+                          <View style={styles.proofHeaderRow}>
+                            <View style={styles.proofCodeTag}>
+                              <DDText variant="caption" color="muted" bold>
+                                PROOF CODE
+                              </DDText>
+                              <DDText variant="h1" color="lime" bold style={styles.proofCodeMonospace}>
+                                {effectiveProofChallenge.proof_code}
+                              </DDText>
+                            </View>
+                            <View style={styles.proofTtlBadge}>
+                              <DDIcon name="clock" size={12} color={DD_COLORS.lime} weight="bold" />
+                              <DDText variant="caption" color="lime" bold style={{ marginLeft: 4 }}>
+                                Valid 45m
+                              </DDText>
+                            </View>
+                          </View>
+                        )}
+
+                        {proofMethod === 'physical_action' && (
+                          <View style={styles.proofActionBox}>
+                            <DDText variant="caption" color="muted" bold style={styles.proofActionLabel}>
+                              REQUIRED PHYSICAL ACTION / GESTURE
+                            </DDText>
+                            <DDText variant="body" color="primary" bold style={styles.proofActionPrompt}>
+                              {effectiveProofChallenge.action_prompt}
+                            </DDText>
+                          </View>
+                        )}
+
+                        <DDText variant="caption" color="secondary" style={styles.proofInstructionText}>
+                          {proofMethod === 'photo_code'
+                            ? '✍️ Write code '
+                            : '✍️ Include code '}
+                          <DDText variant="caption" color="lime" bold>
+                            {effectiveProofChallenge.proof_code}
+                          </DDText>
+                          {proofMethod === 'photo_code'
+                            ? ' on paper or note and include it in your photo for your verifier.'
+                            : ' on paper/screen and demonstrate the gesture in your evidence for your verifier.'}
+                        </DDText>
+
+                        {isProofExpired ? (
+                          <DDButton
+                            title="Generate Fresh Code"
+                            variant="primary"
+                            iconLeft="refresh"
+                            loading={isGeneratingProof}
+                            disabled={isGeneratingProof}
+                            onPress={handleGenerateProof}
+                            fullWidth
+                            style={{ marginTop: 8 }}
+                          />
+                        ) : null}
+                      </View>
+                    )}
+                  </View>
+                )}
+
                 {/* Optional Submission Note */}
                 <View style={styles.formGroup}>
                   <DDText variant="label" color="primary" bold style={styles.formLabel}>
@@ -1461,13 +2331,23 @@ export default function ChallengeDetailScreen() {
                   />
                 </View>
 
-                {/* WhatsApp Info Notice */}
+                {/* Info Notice Box */}
                 <View style={styles.infoNoticeBox}>
                   <DDIcon name="info" size={16} color={DD_COLORS.info} weight="bold" />
                   <DDText variant="caption" color="secondary" style={styles.infoNoticeBody}>
-                    1. Tap Submit below to log your dare completion.{"\n"}
-                    2. Next, tap &lsquo;Share Proof on WhatsApp&rsquo; to send proof to your verifier.{"\n"}
-                    3. Once verified, your streak will instantly update!
+                    {isProofCodeRequired ? (
+                      <>
+                        1. Tap Submit below to log your dare completion.{"\n"}
+                        2. Next, tap &lsquo;Share Proof on WhatsApp&rsquo; to send proof to your verifier.{"\n"}
+                        3. Once verified, your streak will instantly update!
+                      </>
+                    ) : (
+                      <>
+                        1. Tap Submit below to log your dare completion.{"\n"}
+                        2. Your assigned verifier will review and confirm your submission in DareDrop.{"\n"}
+                        3. Once verified, your streak will instantly update!
+                      </>
+                    )}
                   </DDText>
                 </View>
 
@@ -1483,10 +2363,33 @@ export default function ChallengeDetailScreen() {
 
                 {/* Submit Action */}
                 <DDButton
-                  title="Submit for Peer Verification"
+                  title={
+                    isProofCodeRequired && !effectiveProofChallenge
+                      ? 'Generate Proof Code to Submit'
+                      : isModalResubmission
+                        ? modalGraceStatus.isExpired
+                          ? modalGraceStatus.isUnverifiable
+                            ? 'Timestamp Unverified'
+                            : 'Resubmission Window Expired'
+                          : 'Resubmit for Peer Verification'
+                        : 'Submit for Peer Verification'
+                  }
                   variant="primary"
                   loading={isSubmitting}
-                  disabled={isSubmitting || !selectedVerifierId || eligibleVerifiers.length === 0}
+                  disabled={
+                    isSubmitting ||
+                    isGeneratingProof ||
+                    !selectedVerifierId ||
+                    eligibleVerifiers.length === 0 ||
+                    (isModalResubmission && modalGraceStatus.isExpired) ||
+                    (isProofCodeRequired
+                      ? !effectiveProofChallenge || isProofExpired
+                      : proofMethod === 'text_log'
+                        ? textEntry.trim().length < 5 || textEntry.trim().length > 500
+                        : proofMethod === 'numeric_entry'
+                          ? !numericValue.trim() || !Number.isFinite(Number(numericValue.trim()))
+                          : false)
+                  }
                   onPress={handleSubmitCompletion}
                   fullWidth
                   style={styles.modalSubmitActionBtn}
@@ -1572,6 +2475,16 @@ export default function ChallengeDetailScreen() {
                 </DDText>
               </View>
             )}
+
+            {/* Reassign Advisory Notice */}
+            <View style={styles.reassignNoticeBox}>
+              <DDIcon name="info" size={14} color={DD_COLORS.info} weight="bold" />
+              <DDText variant="caption" color="secondary" style={styles.reassignNoticeText}>
+                {isProofCodeRequired
+                  ? 'Reassigning updates who can verify on DareDrop, but does NOT transfer WhatsApp media. You must share your proof photo/video on WhatsApp directly with your newly assigned verifier.'
+                  : 'Reassigning updates who can verify your submission on DareDrop. Your new verifier will be able to review your submitted completion directly in the app.'}
+              </DDText>
+            </View>
 
             <DDButton
               title="Confirm Reassignment"
@@ -1781,24 +2694,6 @@ const styles = StyleSheet.create({
   backBtn: {
     marginTop: DD_SPACING.sm,
   },
-  toastContainer: {
-    position: 'absolute',
-    alignSelf: 'center',
-    zIndex: 999,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: DD_COLORS.bgCard,
-    borderWidth: 1.5,
-    borderColor: DD_COLORS.lime,
-    paddingVertical: DD_SPACING.xs,
-    paddingHorizontal: DD_SPACING.md,
-    borderRadius: DD_RADII.pill,
-    ...DD_COLORS.limeGlow ? { elevation: 6 } : {},
-  },
-  toastText: {
-    letterSpacing: 0.2,
-  },
   navBar: {
     paddingHorizontal: DD_SPACING.lg,
     paddingBottom: DD_SPACING.sm,
@@ -1879,6 +2774,21 @@ const styles = StyleSheet.create({
     borderColor: DD_COLORS.borderSubtle,
   },
   typePillText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  proofMethodPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 3,
+    borderRadius: DD_RADII.pill,
+    backgroundColor: 'rgba(0, 212, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 212, 255, 0.25)',
+  },
+  proofMethodPillText: {
     fontSize: 11,
     fontWeight: '700',
   },
@@ -2051,6 +2961,47 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 59, 86, 0.25)',
   },
+  statusCalloutResubmission: {
+    backgroundColor: 'rgba(255, 107, 53, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 53, 0.25)',
+  },
+  modalResubmitCard: {
+    backgroundColor: 'rgba(255, 107, 53, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 53, 0.3)',
+    borderRadius: DD_RADII.md,
+    padding: DD_SPACING.md,
+    marginBottom: DD_SPACING.md,
+    gap: 6,
+  },
+  modalResubmitHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  modalPrevFeedbackBox: {
+    backgroundColor: 'rgba(0, 0, 0, 0.25)',
+    borderRadius: DD_RADII.sm,
+    padding: DD_SPACING.sm,
+    borderLeftWidth: 2,
+    borderLeftColor: DD_COLORS.coral,
+    marginTop: 2,
+  },
+  modalGraceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  reviewPrevFeedbackBox: {
+    backgroundColor: 'rgba(255, 107, 53, 0.08)',
+    borderRadius: DD_RADII.sm,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 4,
+    borderLeftWidth: 2,
+    borderLeftColor: DD_COLORS.coral,
+    marginTop: 4,
+    marginBottom: 4,
+  },
   calloutTexts: {
     flex: 1,
     gap: 4,
@@ -2118,6 +3069,17 @@ const styles = StyleSheet.create({
   reviewBtnFlex: {
     flex: 1,
   },
+  reviewProofBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: DD_COLORS.bgCard,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: DD_SPACING.xs,
+    borderRadius: DD_RADII.sm,
+    marginTop: 4,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+  },
 
   /* History Section */
   historyHeader: {
@@ -2145,6 +3107,14 @@ const styles = StyleSheet.create({
   historyNote: {
     fontStyle: 'italic',
     marginTop: 2,
+  },
+  historyMetricText: {
+    marginTop: 2,
+    fontWeight: '700',
+  },
+  historyLogText: {
+    marginTop: 2,
+    fontStyle: 'italic',
   },
   rejectionReasonText: {
     marginTop: 2,
@@ -2387,6 +3357,15 @@ const styles = StyleSheet.create({
     minHeight: 80,
     textAlignVertical: 'top',
   },
+  peerConfirmationCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: 'rgba(191, 253, 64, 0.25)',
+  },
   infoNoticeBox: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -2461,6 +3440,161 @@ const styles = StyleSheet.create({
   },
   modalSuccessBtn: {
     marginTop: DD_SPACING.xs,
+  },
+  successProofDetailsBox: {
+    width: '100%',
+    backgroundColor: DD_COLORS.bgElement,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    padding: DD_SPACING.md,
+    gap: DD_SPACING.xs,
+    marginVertical: DD_SPACING.xs,
+  },
+  proofCodeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  proofCodeBadge: {
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(191, 253, 64, 0.4)',
+    paddingHorizontal: DD_SPACING.md,
+    paddingVertical: 4,
+    borderRadius: DD_RADII.sm,
+  },
+  proofCodeText: {
+    letterSpacing: 2,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  proofActionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 4,
+  },
+
+  /* Dynamic Proof Challenge Styles in Form */
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: DD_SPACING.xs,
+  },
+  generateProofPromptBox: {
+    backgroundColor: DD_COLORS.bgElement,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    borderRadius: DD_RADII.md,
+    padding: DD_SPACING.md,
+    gap: DD_SPACING.xs,
+  },
+  generateProofHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  generateProofDesc: {
+    lineHeight: 18,
+    marginVertical: DD_SPACING.xs,
+  },
+  generateProofBtn: {
+    marginTop: DD_SPACING.xs,
+  },
+  proofErrorBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 75, 75, 0.1)',
+    padding: DD_SPACING.sm,
+    borderRadius: DD_RADII.sm,
+    marginVertical: DD_SPACING.xs,
+  },
+  dateChangeNoticeBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 184, 0, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 184, 0, 0.3)',
+    borderRadius: DD_RADII.sm,
+    paddingVertical: DD_SPACING.xs,
+    paddingHorizontal: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
+    marginBottom: DD_SPACING.xs,
+  },
+  proofCard: {
+    backgroundColor: DD_COLORS.bgHighlight,
+    borderWidth: 1,
+    borderColor: 'rgba(191, 253, 64, 0.35)',
+    borderRadius: DD_RADII.lg,
+    padding: DD_SPACING.md,
+    gap: DD_SPACING.sm,
+  },
+  proofCardExpired: {
+    borderColor: 'rgba(255, 75, 75, 0.4)',
+    backgroundColor: 'rgba(255, 75, 75, 0.05)',
+  },
+  proofHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  proofCodeTag: {
+    gap: 2,
+  },
+  proofCodeMonospace: {
+    fontSize: 28,
+    letterSpacing: 4,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  proofTtlBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 4,
+    borderRadius: DD_RADII.full,
+  },
+  proofExpiredBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 75, 75, 0.12)',
+    padding: DD_SPACING.sm,
+    borderRadius: DD_RADII.sm,
+  },
+  proofActionBox: {
+    backgroundColor: DD_COLORS.bgCard,
+    padding: DD_SPACING.sm,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    gap: 4,
+  },
+  proofActionLabel: {
+    fontSize: 10,
+    letterSpacing: 0.5,
+  },
+  proofActionPrompt: {
+    lineHeight: 20,
+  },
+  proofInstructionText: {
+    lineHeight: 17,
+  },
+
+  /* Reassign Advisory Notice */
+  reassignNoticeBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: DD_SPACING.xs,
+    backgroundColor: 'rgba(0, 212, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 212, 255, 0.25)',
+    padding: DD_SPACING.sm,
+    borderRadius: DD_RADII.md,
+    marginBottom: DD_SPACING.md,
+  },
+  reassignNoticeText: {
+    flex: 1,
+    lineHeight: 17,
   },
 
   /* Invite Friends Modal */

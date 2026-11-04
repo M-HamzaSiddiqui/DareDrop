@@ -19,11 +19,13 @@ import {
   DD_RADII,
   DD_SPACING,
 } from '@/constants/dd-theme';
+import { ProofConfig, ProofMethod } from '@/data/challenges';
 import { DDBadge } from '@/components/ui/dd-badge';
 import { DDButton } from '@/components/ui/dd-button';
 import { DDCard } from '@/components/ui/dd-card';
 import { DDIcon, type DDIconName } from '@/components/ui/dd-icon';
 import { DDText } from '@/components/ui/dd-text';
+import { useToast, sanitizeUserErrorMessage } from '@/components/ui/dd-toast';
 import { useAuth } from '@/lib/auth-context';
 import { useChallenges } from '@/store/challenges-store';
 
@@ -37,6 +39,64 @@ const CATEGORY_ICONS: Record<CategoryKey, DDIconName> = {
   Learning: 'compass',
 };
 
+const PROOF_METHODS: {
+  id: ProofMethod;
+  title: string;
+  badge: string;
+  description: string;
+  icon: DDIconName;
+}[] = [
+  {
+    id: 'physical_action',
+    title: 'Gesture + Code',
+    badge: 'Anti-Cheat',
+    description: 'Evidence showing a 4-character code and a random physical gesture',
+    icon: 'shield-check',
+  },
+  {
+    id: 'photo_code',
+    title: 'Photo + Code',
+    badge: 'Visual',
+    description: 'Photo showing a unique 4-character code on paper or screen',
+    icon: 'sparkle',
+  },
+  {
+    id: 'numeric_entry',
+    title: 'Number',
+    badge: 'Metric',
+    description: 'Log an amount or count (e.g. km, reps, pages, minutes)',
+    icon: 'target',
+  },
+  {
+    id: 'text_log',
+    title: 'Written Log',
+    badge: 'Reflection',
+    description: 'Write a short reflection or summary (5 to 500 characters)',
+    icon: 'compass',
+  },
+  {
+    id: 'peer_confirmation',
+    title: 'Peer Confirmation',
+    badge: 'Quick',
+    description: 'Referee or peer directly vouches that you completed the dare',
+    icon: 'users',
+  },
+];
+
+function getDefaultProofMethod(cat: CategoryKey): ProofMethod {
+  switch (cat) {
+    case 'Fitness':
+      return 'physical_action';
+    case 'Focus':
+    case 'Learning':
+      return 'text_log';
+    case 'Fun':
+      return 'photo_code';
+    default:
+      return 'physical_action';
+  }
+}
+
 interface FormState {
   title: string;
   description: string;
@@ -45,6 +105,10 @@ interface FormState {
   durationDays: number;
   useCustomDeadline: boolean;
   customDays: string;
+  proofMethod: ProofMethod;
+  proofUnit: string;
+  proofMinValue: string;
+  proofMaxValue: string;
 }
 
 interface FormErrors {
@@ -52,6 +116,8 @@ interface FormErrors {
   description?: string;
   category?: string;
   customDays?: string;
+  proofUnit?: string;
+  proofRange?: string;
 }
 
 /**
@@ -71,6 +137,7 @@ export default function CreateScreen() {
   const insets = useSafeAreaInsets();
   const { createChallenge, refreshChallenges, isBackendConnected } = useChallenges();
   const { isGuest, showAuthModal } = useAuth();
+  const toast = useToast();
 
   const [form, setForm] = useState<FormState>({
     title: '',
@@ -80,7 +147,12 @@ export default function CreateScreen() {
     durationDays: 14,
     useCustomDeadline: false,
     customDays: '45',
+    proofMethod: 'physical_action',
+    proofUnit: '',
+    proofMinValue: '',
+    proofMaxValue: '',
   });
+  const [hasManuallySelectedMethod, setHasManuallySelectedMethod] = useState(false);
   const [errors, setErrors] = useState<FormErrors>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -134,6 +206,25 @@ export default function CreateScreen() {
       }
     }
 
+    if (form.proofMethod === 'numeric_entry') {
+      if (form.proofUnit.trim().length > 12) {
+        e.proofUnit = 'Unit must be 12 characters or less';
+      }
+      const minVal = parseFloat(form.proofMinValue);
+      const maxVal = parseFloat(form.proofMaxValue);
+      if (!isNaN(minVal) && minVal < 0) {
+        e.proofRange = 'Minimum value must be at least 0';
+      } else if (!isNaN(maxVal) && maxVal < 0) {
+        e.proofRange = 'Maximum value must be at least 0';
+      } else if (!isNaN(minVal) && minVal > 1000000) {
+        e.proofRange = 'Minimum value cannot exceed 1,000,000';
+      } else if (!isNaN(maxVal) && maxVal > 1000000) {
+        e.proofRange = 'Maximum value cannot exceed 1,000,000';
+      } else if (!isNaN(minVal) && !isNaN(maxVal) && minVal > maxVal) {
+        e.proofRange = 'Minimum value cannot be greater than maximum value';
+      }
+    }
+
     return e;
   }
 
@@ -144,7 +235,11 @@ export default function CreateScreen() {
     if (Object.keys(e).length > 0) return;
 
     if (isGuest) {
-      showAuthModal('Account required to create a Dare. Sign in or register to publish challenges!');
+      showAuthModal({
+        title: 'Sign In to Create Dare',
+        description: 'Account required to create a Dare. Sign in or register to publish challenges!',
+        onSuccess: handleSubmit,
+      });
       return;
     }
 
@@ -154,6 +249,21 @@ export default function CreateScreen() {
       const endsAt = new Date();
       endsAt.setDate(endsAt.getDate() + effectiveDurationDays);
 
+      const proofConfig: ProofConfig = {};
+      if (form.proofMethod === 'numeric_entry') {
+        if (form.proofUnit.trim()) {
+          proofConfig.unit = form.proofUnit.trim();
+        }
+        if (form.proofMinValue.trim()) {
+          const minNum = parseFloat(form.proofMinValue.trim());
+          if (!isNaN(minNum)) proofConfig.min_value = minNum;
+        }
+        if (form.proofMaxValue.trim()) {
+          const maxNum = parseFloat(form.proofMaxValue.trim());
+          if (!isNaN(maxNum)) proofConfig.max_value = maxNum;
+        }
+      }
+
       const newChallenge = await createChallenge({
         title: form.title.trim(),
         description: form.description.trim(),
@@ -162,14 +272,19 @@ export default function CreateScreen() {
         endsAt,
         creator: 'You',
         challengeType: form.challengeType,
+        proofMethod: form.proofMethod,
+        proofConfig,
       });
 
       await refreshChallenges().catch(() => {});
 
       setCreatedId(newChallenge.id);
       setSubmitted(true);
+      toast.success('Dare published successfully!');
     } catch (err: any) {
-      setSubmitError(err?.message || 'Failed to create challenge. Please try again.');
+      const msg = sanitizeUserErrorMessage(err?.message, 'Failed to create challenge. Please try again.');
+      setSubmitError(msg);
+      toast.error(msg);
     } finally {
       setIsSubmitting(false);
     }
@@ -184,7 +299,12 @@ export default function CreateScreen() {
       durationDays: 14,
       useCustomDeadline: false,
       customDays: '45',
+      proofMethod: 'physical_action',
+      proofUnit: '',
+      proofMinValue: '',
+      proofMaxValue: '',
     });
+    setHasManuallySelectedMethod(false);
     setErrors({});
     setSubmitError(null);
     setSubmitted(false);
@@ -294,7 +414,7 @@ export default function CreateScreen() {
           <View style={[styles.inputCard, errors.description && styles.inputCardError]}>
             <TextInput
               style={[styles.textInput, styles.textAreaInput]}
-              placeholder="Explain what participants will do daily, what proof to share on WhatsApp, and how to verify…"
+              placeholder="Explain what participants will do daily and how they will prove completion…"
               placeholderTextColor={DD_COLORS.textMuted}
               value={form.description}
               onChangeText={(v) => {
@@ -419,7 +539,11 @@ export default function CreateScreen() {
                   key={cat}
                   onPress={() => {
                     if (isSubmitting) return;
-                    setForm((f) => ({ ...f, category: cat }));
+                    setForm((f) => ({
+                      ...f,
+                      category: cat,
+                      proofMethod: hasManuallySelectedMethod ? f.proofMethod : getDefaultProofMethod(cat),
+                    }));
                     if (errors.category) setErrors((e) => ({ ...e, category: undefined }));
                   }}
                   android_ripple={{ color: 'rgba(255, 255, 255, 0.08)', borderless: false }}
@@ -458,7 +582,146 @@ export default function CreateScreen() {
           </View>
         </FormField>
 
-        {/* F. Duration and Deadline */}
+        {/* F. Proof Method Selector */}
+        <FormField
+          label="How will completion be proven?"
+          error={errors.proofUnit || errors.proofRange}
+          required>
+          <View style={styles.proofMethodList}>
+            {PROOF_METHODS.map((pm) => {
+              const isSelected = form.proofMethod === pm.id;
+              return (
+                <Pressable
+                  key={pm.id}
+                  onPress={() => {
+                    if (isSubmitting) return;
+                    setHasManuallySelectedMethod(true);
+                    setForm((f) => ({ ...f, proofMethod: pm.id }));
+                  }}
+                  android_ripple={{ color: 'rgba(191, 253, 64, 0.08)', borderless: false }}
+                  style={({ pressed }) => [
+                    styles.proofMethodCard,
+                    isSelected && styles.proofMethodCardActive,
+                    pressed && styles.cardPressed,
+                  ]}
+                  accessibilityRole="radio"
+                  accessibilityLabel={pm.title}
+                  accessibilityState={{ checked: isSelected }}>
+                  <View style={styles.proofMethodHeader}>
+                    <View
+                      style={[
+                        styles.proofMethodIconCircle,
+                        isSelected && styles.proofMethodIconCircleActive,
+                      ]}>
+                      <DDIcon
+                        name={pm.icon}
+                        size={18}
+                        color={isSelected ? DD_COLORS.lime : DD_COLORS.textMuted}
+                        weight={isSelected ? 'fill' : 'bold'}
+                      />
+                    </View>
+                    <View style={styles.proofMethodTitleGroup}>
+                      <View style={styles.proofMethodTitleRow}>
+                        <DDText
+                          variant="label"
+                          bold
+                          color={isSelected ? 'lime' : 'primary'}
+                          style={styles.proofMethodTitle}>
+                          {pm.title}
+                        </DDText>
+                        <DDBadge
+                          label={pm.badge}
+                          variant={isSelected ? 'lime' : 'neutral'}
+                          size="sm"
+                        />
+                      </View>
+                      <DDText variant="caption" color="secondary" style={styles.proofMethodDesc}>
+                        {pm.description}
+                      </DDText>
+                    </View>
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          {/* Optional Numeric Configuration */}
+          {form.proofMethod === 'numeric_entry' && (
+            <View style={styles.numericConfigBox}>
+              <DDText variant="caption" color="muted" bold style={styles.numericConfigHeader}>
+                NUMERIC PARAMETERS (OPTIONAL)
+              </DDText>
+              <View style={styles.numericInputsRow}>
+                <View style={styles.numericFieldCol}>
+                  <DDText variant="caption" color="secondary" style={styles.numericFieldLabel}>
+                    Unit (e.g. km, reps)
+                  </DDText>
+                  <TextInput
+                    style={[styles.numericInput, errors.proofUnit && styles.inputErrorBorder]}
+                    placeholder="km"
+                    placeholderTextColor={DD_COLORS.textMuted}
+                    value={form.proofUnit}
+                    onChangeText={(v) => {
+                      setForm((f) => ({ ...f, proofUnit: v.slice(0, 12) }));
+                      if (errors.proofUnit) setErrors((e) => ({ ...e, proofUnit: undefined }));
+                    }}
+                    maxLength={12}
+                    editable={!isSubmitting}
+                  />
+                </View>
+
+                <View style={styles.numericFieldCol}>
+                  <DDText variant="caption" color="secondary" style={styles.numericFieldLabel}>
+                    Min Value
+                  </DDText>
+                  <TextInput
+                    style={[styles.numericInput, errors.proofRange && styles.inputErrorBorder]}
+                    placeholder="1"
+                    placeholderTextColor={DD_COLORS.textMuted}
+                    keyboardType="numeric"
+                    value={form.proofMinValue}
+                    onChangeText={(v) => {
+                      setForm((f) => ({ ...f, proofMinValue: v.replace(/[^0-9.]/g, '') }));
+                      if (errors.proofRange) setErrors((e) => ({ ...e, proofRange: undefined }));
+                    }}
+                    editable={!isSubmitting}
+                  />
+                </View>
+
+                <View style={styles.numericFieldCol}>
+                  <DDText variant="caption" color="secondary" style={styles.numericFieldLabel}>
+                    Max Value
+                  </DDText>
+                  <TextInput
+                    style={[styles.numericInput, errors.proofRange && styles.inputErrorBorder]}
+                    placeholder="42"
+                    placeholderTextColor={DD_COLORS.textMuted}
+                    keyboardType="numeric"
+                    value={form.proofMaxValue}
+                    onChangeText={(v) => {
+                      setForm((f) => ({ ...f, proofMaxValue: v.replace(/[^0-9.]/g, '') }));
+                      if (errors.proofRange) setErrors((e) => ({ ...e, proofRange: undefined }));
+                    }}
+                    editable={!isSubmitting}
+                  />
+                </View>
+              </View>
+
+              {errors.proofUnit ? (
+                <DDText variant="caption" color="danger" style={styles.fieldErrorText}>
+                  {errors.proofUnit}
+                </DDText>
+              ) : null}
+              {errors.proofRange ? (
+                <DDText variant="caption" color="danger" style={styles.fieldErrorText}>
+                  {errors.proofRange}
+                </DDText>
+              ) : null}
+            </View>
+          )}
+        </FormField>
+
+        {/* G. Duration and Deadline */}
         <FormField label="Duration & Deadline">
           <View style={styles.deadlineToggleRow}>
             <Pressable
@@ -589,6 +852,13 @@ export default function CreateScreen() {
                   variant={form.challengeType === 'daily' ? 'lime' : 'purple'}
                   size="sm"
                   icon={form.challengeType === 'daily' ? 'flame' : 'target'}
+                />
+
+                <DDBadge
+                  label={PROOF_METHODS.find((p) => p.id === form.proofMethod)?.title || 'Gesture'}
+                  variant="neutral"
+                  size="sm"
+                  icon={PROOF_METHODS.find((p) => p.id === form.proofMethod)?.icon}
                 />
               </View>
 
@@ -936,6 +1206,88 @@ const styles = StyleSheet.create({
   },
   categoryLabel: {
     fontSize: 13,
+  },
+
+  /* Proof Method Selector */
+  proofMethodList: {
+    gap: DD_SPACING.sm,
+  },
+  proofMethodCard: {
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.card,
+    borderWidth: 1.5,
+    borderColor: DD_COLORS.borderSubtle,
+    padding: DD_SPACING.md,
+  },
+  proofMethodCardActive: {
+    borderColor: DD_COLORS.lime,
+    backgroundColor: 'rgba(191, 253, 64, 0.05)',
+  },
+  proofMethodHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: DD_SPACING.sm,
+  },
+  proofMethodIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: DD_COLORS.bgElement,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  proofMethodIconCircleActive: {
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
+  },
+  proofMethodTitleGroup: {
+    flex: 1,
+    gap: 3,
+  },
+  proofMethodTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  proofMethodTitle: {
+    fontSize: 15,
+  },
+  proofMethodDesc: {
+    lineHeight: 16,
+  },
+  numericConfigBox: {
+    marginTop: DD_SPACING.sm,
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.card,
+    borderWidth: 1,
+    borderColor: 'rgba(191, 253, 64, 0.2)',
+    padding: DD_SPACING.md,
+    gap: DD_SPACING.sm,
+  },
+  numericConfigHeader: {
+    letterSpacing: 1,
+  },
+  numericInputsRow: {
+    flexDirection: 'row',
+    gap: DD_SPACING.sm,
+  },
+  numericFieldCol: {
+    flex: 1,
+    gap: 4,
+  },
+  numericFieldLabel: {
+    fontSize: 11,
+  },
+  numericInput: {
+    backgroundColor: DD_COLORS.bgElement,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: DD_SPACING.xs,
+    color: DD_COLORS.text,
+    fontSize: 14,
+    minHeight: 38,
   },
 
   /* Duration / Deadline */
