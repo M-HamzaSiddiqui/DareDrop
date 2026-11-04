@@ -1,6 +1,6 @@
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
@@ -10,13 +10,18 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Text,
   TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { CATEGORY_COLORS, CATEGORY_EMOJIS, CategoryKey, DD } from '@/constants/dd-theme';
+import {
+  CATEGORY_COLORS,
+  CategoryKey,
+  DD_COLORS,
+  DD_RADII,
+  DD_SPACING,
+} from '@/constants/dd-theme';
 import {
   calculateProgress,
   Challenge,
@@ -31,7 +36,10 @@ import {
   shareChallenge,
 } from '@/lib/sharing';
 import {
+  formatReviewedAt,
   formatSubmittedAt,
+  getResubmissionGraceStatus,
+  isResubmission,
   MAX_REJECTION_REASON_LENGTH,
   participantDisplayName,
   splitCompletionsForUser,
@@ -39,6 +47,7 @@ import {
 import { buildCompletionsChannelName, subscribeToCompletions } from '@/lib/realtime';
 import {
   DbCompletion,
+  DbProofChallenge,
   EligibleVerifier,
   isSupabaseConfigured,
   ParticipantProgress,
@@ -52,13 +61,44 @@ import {
 } from '@/lib/friends';
 import { useAuth } from '@/lib/auth-context';
 import { useChallenges } from '@/store/challenges-store';
+import { DDAvatar } from '@/components/ui/dd-avatar';
+import { DDBadge } from '@/components/ui/dd-badge';
+import { DDButton } from '@/components/ui/dd-button';
+import { DDCard } from '@/components/ui/dd-card';
+import { DDIcon, type DDIconName } from '@/components/ui/dd-icon';
+import { DDText } from '@/components/ui/dd-text';
+import { useToast, sanitizeUserErrorMessage } from '@/components/ui/dd-toast';
 
+const CATEGORY_ICONS: Record<CategoryKey, DDIconName> = {
+  Fitness: 'flame',
+  Focus: 'target',
+  Fun: 'sparkle',
+  Learning: 'compass',
+};
+
+/**
+ * DareDrop Redesigned Challenge Details Screen.
+ *
+ * Implements:
+ * - Clean dark-first aesthetic with Neon Lime and Electric Violet accents
+ * - Header navigation with Phosphor icons, share action, and joined status
+ * - Hero banner with category/type badges and creator attribution
+ * - 3-metric statistics grid (Challengers, Time Left, Duration)
+ * - Verified progress tracker with streak flame indicator and progress bar
+ * - Peer verification proof submission card with WhatsApp handoff and real-time status banners
+ * - Verifier review queue for assigned peer approvals
+ * - User submission log with verifier reassignment and resubmission triggers
+ * - Friend invitation card with direct invite modal and deep-link copying
+ * - Sticky bottom CTA with safe-area clearance
+ */
 export default function ChallengeDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const {
     challenges,
     joinChallenge,
     fetchChallengeById,
+    generateProofChallenge,
+    cancelProofChallenge,
     submitCompletion,
     fetchCompletions,
     fetchEligibleVerifiers,
@@ -69,12 +109,12 @@ export default function ChallengeDetailScreen() {
     refreshPendingReviews,
   } = useChallenges();
   const { isGuest, showAuthModal } = useAuth();
+  const toast = useToast();
   const insets = useSafeAreaInsets();
 
   const localChallenge = challenges.find((c) => c.id === id);
   const [loadingRemote, setLoadingRemote] = useState(!localChallenge && Boolean(id));
   const [remoteChallenge, setRemoteChallenge] = useState<Challenge | null>(null);
-  const [copiedToast, setCopiedToast] = useState<string | null>(null);
   const [isJoining, setIsJoining] = useState(false);
   const [showLinkInfo, setShowLinkInfo] = useState(false);
 
@@ -88,9 +128,127 @@ export default function ChallengeDetailScreen() {
   const [selectedDate, setSelectedDate] = useState<string>('');
   const [selectedVerifierId, setSelectedVerifierId] = useState<string>('');
   const [submissionNote, setSubmissionNote] = useState<string>('');
+  const [textEntry, setTextEntry] = useState<string>('');
+  const [numericValue, setNumericValue] = useState<string>('');
+  const [activeProofChallenge, setActiveProofChallenge] = useState<DbProofChallenge | null>(null);
+  const [isGeneratingProof, setIsGeneratingProof] = useState(false);
+  const [proofError, setProofError] = useState<string | null>(null);
+  const [dateChangeNotice, setDateChangeNotice] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState<DbCompletion | null>(null);
+
+  // Resubmission grace period ticker: updates countdown on focus, foreground, and 60s tick
+  const [currentTimeMs, setCurrentTimeMs] = useState<number>(Date.now());
+
+  useFocusEffect(
+    useCallback(() => {
+      setCurrentTimeMs(Date.now());
+    }, []),
+  );
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        setCurrentTimeMs(Date.now());
+      }
+    });
+    const interval = setInterval(() => {
+      setCurrentTimeMs(Date.now());
+    }, 60000);
+    return () => {
+      sub.remove();
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Account isolation: reset transient proof state when user identity changes during render
+  const [prevUserId, setPrevUserId] = useState(currentUserId);
+  if (prevUserId !== currentUserId) {
+    setPrevUserId(currentUserId);
+    setActiveProofChallenge(null);
+    setProofError(null);
+    setDateChangeNotice(null);
+    setSubmitError(null);
+    setSubmitSuccess(null);
+    setTextEntry('');
+    setNumericValue('');
+  }
+
+  // Cancellation tracking to prevent duplicate RPC calls
+  const cancelledProofIdsRef = useRef<Set<string>>(new Set());
+
+  const cancelProofChallengeSafe = useCallback(
+    (proof: DbProofChallenge | null | undefined) => {
+      if (!proof || !proof.id) return;
+      if (proof.participant_id !== currentUserId) return;
+      if (cancelledProofIdsRef.current.has(proof.id)) return;
+
+      cancelledProofIdsRef.current.add(proof.id);
+      cancelProofChallenge(proof.id).catch(() => {});
+    },
+    [cancelProofChallenge, currentUserId],
+  );
+
+  // Keep refs for safe cleanup on unmount without unsafe state updates
+  const activeProofChallengeRef = useRef<DbProofChallenge | null>(null);
+  activeProofChallengeRef.current = activeProofChallenge;
+  const submitSuccessRef = useRef<DbCompletion | null>(null);
+  submitSuccessRef.current = submitSuccess;
+
+  useEffect(() => {
+    return () => {
+      const active = activeProofChallengeRef.current;
+      const success = submitSuccessRef.current;
+      if (active && !success) {
+        cancelProofChallengeSafe(active);
+      }
+    };
+  }, [cancelProofChallengeSafe]);
+
+  const closeSubmitModal = useCallback(() => {
+    if (activeProofChallenge && !submitSuccess) {
+      cancelProofChallengeSafe(activeProofChallenge);
+    }
+    setActiveProofChallenge(null);
+    setSubmitModalVisible(false);
+    setSubmitSuccess(null);
+    setSubmitError(null);
+    setProofError(null);
+    setDateChangeNotice(null);
+    setTextEntry('');
+    setNumericValue('');
+  }, [activeProofChallenge, submitSuccess, cancelProofChallengeSafe]);
+
+  const handleSelectDate = useCallback(
+    (newDate: string) => {
+      if (newDate === selectedDate) return;
+      if (activeProofChallenge) {
+        cancelProofChallengeSafe(activeProofChallenge);
+        setActiveProofChallenge(null);
+        setDateChangeNotice('Date changed: proof code reset. Generate a new code to continue.');
+      } else {
+        setDateChangeNotice(null);
+      }
+      setSelectedDate(newDate);
+      setProofError(null);
+    },
+    [selectedDate, activeProofChallenge, cancelProofChallengeSafe],
+  );
+
+  const handleSelectVerifier = useCallback(
+    (newVerifierId: string) => {
+      if (newVerifierId === selectedVerifierId) return;
+      if (activeProofChallenge) {
+        cancelProofChallengeSafe(activeProofChallenge);
+        setActiveProofChallenge(null);
+      }
+      setSelectedVerifierId(newVerifierId);
+      setProofError(null);
+      setDateChangeNotice(null);
+    },
+    [selectedVerifierId, activeProofChallenge, cancelProofChallengeSafe],
+  );
 
   // Reassign Modal state
   const [reassignModalVisible, setReassignModalVisible] = useState(false);
@@ -199,7 +357,6 @@ export default function ChallengeDetailScreen() {
   }, [challengeId, fetchCompletions, fetchEligibleVerifiers, fetchParticipantProgress]);
 
   // Live Supabase Realtime subscription for this challenge's completions
-  // Instantly updates status, streak, progress, and review cards when submissions are made, reviewed, or reassigned
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase || !challengeId) return;
 
@@ -239,8 +396,10 @@ export default function ChallengeDetailScreen() {
     return (
       <View style={[styles.root, styles.centerContainer]}>
         <StatusBar style="light" />
-        <ActivityIndicator size="large" color={DD.lime} />
-        <Text style={styles.loadingText}>Loading challenge…</Text>
+        <ActivityIndicator size="large" color={DD_COLORS.lime} />
+        <DDText variant="body" color="secondary" style={styles.loadingText}>
+          Loading challenge…
+        </DDText>
       </View>
     );
   }
@@ -249,24 +408,28 @@ export default function ChallengeDetailScreen() {
     return (
       <View style={[styles.root, styles.notFound]}>
         <StatusBar style="light" />
-        <Text style={styles.notFoundIcon}>🔍</Text>
-        <Text style={styles.notFoundText}>Challenge not found</Text>
-        <Text style={styles.notFoundSubtext}>
+        <View style={styles.notFoundIconCircle}>
+          <DDIcon name="search" size={40} color={DD_COLORS.textMuted} weight="bold" />
+        </View>
+        <DDText variant="h2" color="primary">
+          Challenge not found
+        </DDText>
+        <DDText variant="bodySm" color="secondary" align="center" style={styles.notFoundSubtext}>
           This challenge may have been removed or the link is invalid.
-        </Text>
-        <Pressable
+        </DDText>
+        <DDButton
+          title="Go Back"
+          variant="secondary"
+          iconLeft="arrow-left"
           onPress={handleBack}
-          style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.8 }]}
-          accessibilityRole="button"
-          accessibilityLabel="Go back">
-          <Text style={styles.backBtnText}>← Go Back</Text>
-        </Pressable>
+          style={styles.backBtn}
+        />
       </View>
     );
   }
 
-  const catColor = CATEGORY_COLORS[challenge.category as CategoryKey] || DD.lime;
-  const emoji = CATEGORY_EMOJIS[challenge.category as CategoryKey] || '⚡';
+  const catColor = CATEGORY_COLORS[challenge.category as CategoryKey] || DD_COLORS.lime;
+  const catIcon = CATEGORY_ICONS[challenge.category as CategoryKey] || 'sparkle';
   const timeLeft = timeRemaining(challenge.endsAt);
 
   const { daysElapsed, progressPct: timeProgressPct } = calculateProgress(
@@ -278,7 +441,6 @@ export default function ChallengeDetailScreen() {
   const challengeDates = getChallengeDates(challenge.timezone || 'UTC');
   const todayDate = challengeDates.today;
   const yesterdayDate = challengeDates.yesterday;
-
 
   // Completion statuses (derived from user's OWN submissions)
   const isDaily = challenge.challengeType !== 'one_time';
@@ -308,8 +470,7 @@ export default function ChallengeDetailScreen() {
     if (!challenge) return;
     const res = await copyInviteLink(challenge);
     if (res.success) {
-      setCopiedToast('✓ Invite link copied to clipboard!');
-      setTimeout(() => setCopiedToast(null), 3000);
+      toast.success('Invite link copied to clipboard!');
     }
   }
 
@@ -335,7 +496,10 @@ export default function ChallengeDetailScreen() {
   async function handleInviteFriend(friend: UserFriend) {
     if (!challenge) return;
     if (isGuest) {
-      showAuthModal('Account required to invite friends to a Dare. Sign in or register to connect!');
+      showAuthModal({
+        title: 'Sign In to Invite Friends',
+        description: 'Account required to invite friends to a Dare. Sign in or register to connect!',
+      });
       return;
     }
     setInvitingFriendId(friend.friend_user_id);
@@ -343,8 +507,7 @@ export default function ChallengeDetailScreen() {
     try {
       await sendChallengeInvitation(challenge.id, friend.friend_user_id);
       setInvitedFriendIds((prev) => new Set([...prev, friend.friend_user_id]));
-      setCopiedToast(`⚡ Invitation sent to ${friend.display_name}!`);
-      setTimeout(() => setCopiedToast(null), 3000);
+      toast.success(`Invitation sent to ${friend.display_name}!`);
     } catch (err: any) {
       setInviteFriendError(translateSocialError(err));
     } finally {
@@ -355,38 +518,127 @@ export default function ChallengeDetailScreen() {
   async function handleJoinToggle() {
     if (!challenge || isJoining) return;
     if (isGuest) {
-      showAuthModal('Account required to join a Dare. Sign in or register to join challenges and track your streaks!');
+      showAuthModal({
+        title: 'Sign In to Join Dare',
+        description: 'Account required to join a Dare. Sign in or register to join challenges and track your streaks!',
+        onSuccess: handleJoinToggle,
+      });
       return;
     }
     setIsJoining(true);
     try {
       const res = await joinChallenge(challenge.id);
       if (res.success) {
-        setCopiedToast(res.joined ? '🎉 Welcome to the challenge!' : 'You left this challenge');
-        setTimeout(() => setCopiedToast(null), 2500);
         if (res.joined) {
+          toast.success('Welcome to the challenge!');
           await refreshVerificationData();
         } else {
+          toast.info('You left this challenge.');
           setCompletions([]);
           setEligibleVerifiers([]);
           setParticipantProgress(null);
         }
+      } else {
+        toast.error(sanitizeUserErrorMessage(res.error, 'Failed to update challenge membership.'));
       }
     } finally {
       setIsJoining(false);
     }
   }
 
+  // Dynamically derive effective proof challenge, binding strictly to current user, selected verifier, and selected date
+  const effectiveProofChallenge =
+    activeProofChallenge &&
+    activeProofChallenge.participant_id === currentUserId &&
+    activeProofChallenge.verifier_id === selectedVerifierId &&
+    activeProofChallenge.completion_date === selectedDate
+      ? activeProofChallenge
+      : null;
+
+  const isProofExpired = Boolean(
+    effectiveProofChallenge &&
+    new Date(effectiveProofChallenge.expires_at).getTime() <= Date.now()
+  );
+
+  const proofMethod = challenge?.proofMethod || 'physical_action';
+  const isProofCodeRequired = proofMethod === 'physical_action' || proofMethod === 'photo_code';
+
+  async function handleGenerateProof() {
+    if (!challenge || !selectedVerifierId || !selectedDate || isGeneratingProof) return;
+
+    if (isGuest) {
+      showAuthModal({
+        title: 'Sign In to Generate Proof Challenge',
+        description: 'A registered account is required to generate dynamic proof challenges.',
+      });
+      return;
+    }
+
+    if (activeProofChallenge) {
+      cancelProofChallengeSafe(activeProofChallenge);
+    }
+
+    setIsGeneratingProof(true);
+    setProofError(null);
+    setDateChangeNotice(null);
+    try {
+      const res = await generateProofChallenge({
+        challengeId: challenge.id,
+        verifierId: selectedVerifierId,
+        completionDate: selectedDate,
+      });
+
+      if (!res.success || !res.proofChallenge) {
+        if (res.isFutureDate && res.serverDate && res.serverDate !== selectedDate) {
+          setSelectedDate(res.serverDate);
+          setProofError(
+            `Clock mismatch: your device is ahead of the challenge timezone. Date adjusted to ${res.serverDate}. Tap "Get Proof Code" to proceed.`
+          );
+        } else {
+          setProofError(res.error || 'Failed to generate proof challenge.');
+        }
+        return;
+      }
+
+      setActiveProofChallenge(res.proofChallenge);
+      setProofError(null);
+      setDateChangeNotice(null);
+    } catch (err: any) {
+      setProofError(err?.message || 'Failed to generate proof challenge.');
+    } finally {
+      setIsGeneratingProof(false);
+    }
+  }
+
   function openSubmitModal(prefillDate?: string) {
     if (isGuest) {
-      showAuthModal('Account required to submit completion proof. Sign in to verify your progress!');
+      showAuthModal({
+        title: 'Sign In to Submit Proof',
+        description: 'Account required to submit completion proof. Sign in to verify your progress!',
+        onSuccess: () => setSubmitModalVisible(true),
+      });
       return;
     }
     const targetDate = prefillDate || todayDate;
     setSelectedDate(targetDate);
     setSubmissionNote('');
+    setTextEntry('');
+    setNumericValue('');
     setSubmitError(null);
     setSubmitSuccess(null);
+    setProofError(null);
+    setDateChangeNotice(null);
+
+    // If an existing proof challenge does not match target date or verifier, cancel and reset it
+    if (activeProofChallenge) {
+      if (
+        activeProofChallenge.completion_date !== targetDate ||
+        (selectedVerifierId && activeProofChallenge.verifier_id !== selectedVerifierId)
+      ) {
+        cancelProofChallengeSafe(activeProofChallenge);
+        setActiveProofChallenge(null);
+      }
+    }
 
     if (eligibleVerifiers.length > 0) {
       if (!selectedVerifierId || !eligibleVerifiers.some((v) => v.user_id === selectedVerifierId)) {
@@ -399,6 +651,50 @@ export default function ChallengeDetailScreen() {
   async function handleSubmitCompletion() {
     if (!challenge || !selectedVerifierId || !selectedDate || isSubmitting) return;
 
+    if (isProofCodeRequired) {
+      if (!effectiveProofChallenge) {
+        setSubmitError('Please generate a dynamic proof challenge code first.');
+        return;
+      }
+
+      if (isProofExpired) {
+        setSubmitError('This proof challenge has expired. Please tap "Get New Code" to regenerate.');
+        return;
+      }
+    }
+
+    if (proofMethod === 'text_log') {
+      const trimmed = textEntry.trim();
+      if (trimmed.length < 5 || trimmed.length > 500) {
+        setSubmitError('Written log must be between 5 and 500 characters.');
+        return;
+      }
+    }
+
+    if (proofMethod === 'numeric_entry') {
+      if (!numericValue.trim()) {
+        setSubmitError('Please enter a numeric completion value.');
+        return;
+      }
+      const val = Number(numericValue.trim());
+      if (!Number.isFinite(val) || val < 0 || val > 1000000) {
+        setSubmitError('Numeric value must be a valid number between 0 and 1,000,000.');
+        return;
+      }
+      if (challenge.proofConfig?.min_value !== undefined && val < challenge.proofConfig.min_value) {
+        setSubmitError(
+          `Value must be at least ${challenge.proofConfig.min_value}${challenge.proofConfig.unit ? ' ' + challenge.proofConfig.unit : ''}.`
+        );
+        return;
+      }
+      if (challenge.proofConfig?.max_value !== undefined && val > challenge.proofConfig.max_value) {
+        setSubmitError(
+          `Value must be at most ${challenge.proofConfig.max_value}${challenge.proofConfig.unit ? ' ' + challenge.proofConfig.unit : ''}.`
+        );
+        return;
+      }
+    }
+
     setIsSubmitting(true);
     setSubmitError(null);
     try {
@@ -406,17 +702,29 @@ export default function ChallengeDetailScreen() {
         challengeId: challenge.id,
         verifierId: selectedVerifierId,
         completionDate: selectedDate,
+        proofChallengeId: isProofCodeRequired ? (effectiveProofChallenge?.id ?? null) : null,
         submissionNote: submissionNote.trim() || undefined,
+        numericValue: proofMethod === 'numeric_entry' ? Number(numericValue.trim()) : undefined,
+        textEntry: proofMethod === 'text_log' ? textEntry.trim() : undefined,
       });
 
       if (!result.success || !result.completion) {
         setSubmitError(result.error || 'Failed to submit completion. Please try again.');
+        if (
+          result.error?.includes('expired') ||
+          result.error?.includes('consumed') ||
+          result.error?.includes('cancelled')
+        ) {
+          setActiveProofChallenge(null);
+        }
         return;
       }
 
-      setSubmitSuccess(result.completion);
-      setCopiedToast('✓ Completion submitted for review!');
-      setTimeout(() => setCopiedToast(null), 3000);
+      const submittedCompletion = result.completion;
+      setActiveProofChallenge(null);
+      setDateChangeNotice(null);
+      setSubmitSuccess(submittedCompletion);
+      toast.success('Completion submitted for review!');
       await refreshVerificationData();
     } catch (err: any) {
       setSubmitError(err?.message || 'An unexpected error occurred during submission.');
@@ -434,6 +742,8 @@ export default function ChallengeDetailScreen() {
       completionDate: completion.completion_date,
       note: completion.submission_note || undefined,
       verifierName,
+      proofCode: completion.proof_code || undefined,
+      actionPrompt: completion.action_prompt || undefined,
     });
   }
 
@@ -463,8 +773,7 @@ export default function ChallengeDetailScreen() {
 
       setReassignModalVisible(false);
       setReassigningCompletion(null);
-      setCopiedToast('✓ Verifier reassigned successfully!');
-      setTimeout(() => setCopiedToast(null), 3000);
+      toast.success('Verifier reassigned successfully!');
       await refreshVerificationData();
     } catch (err: any) {
       setReassignError(err?.message || 'Failed to reassign verifier.');
@@ -486,16 +795,13 @@ export default function ChallengeDetailScreen() {
         decision: 'approved',
       });
       if (!res.success) {
-        setCopiedToast(`❌ ${res.error || 'Failed to approve'}`);
-        setTimeout(() => setCopiedToast(null), 3500);
+        toast.error(sanitizeUserErrorMessage(res.error, 'Failed to approve'));
         return;
       }
-      setCopiedToast('✓ Dare approved successfully!');
-      setTimeout(() => setCopiedToast(null), 3000);
+      toast.success('Dare approved successfully!');
       await Promise.all([refreshVerificationData(), refreshPendingReviews()]);
     } catch (err: any) {
-      setCopiedToast(`❌ ${err?.message || 'Error approving'}`);
-      setTimeout(() => setCopiedToast(null), 3500);
+      toast.error(sanitizeUserErrorMessage(err?.message, 'Error approving'));
     } finally {
       setIsReviewing(false);
     }
@@ -521,18 +827,15 @@ export default function ChallengeDetailScreen() {
         rejectionReason: inlineRejectionReason.trim() || undefined,
       });
       if (!res.success) {
-        setCopiedToast(`❌ ${res.error || 'Failed to reject'}`);
-        setTimeout(() => setCopiedToast(null), 3500);
+        toast.error(sanitizeUserErrorMessage(res.error, 'Failed to reject'));
         return;
       }
       setInlineRejectModalVisible(false);
       setRejectingCompletion(null);
-      setCopiedToast('Submission rejected.');
-      setTimeout(() => setCopiedToast(null), 3000);
+      toast.info('Submission rejected.');
       await Promise.all([refreshVerificationData(), refreshPendingReviews()]);
     } catch (err: any) {
-      setCopiedToast(`❌ ${err?.message || 'Error rejecting'}`);
-      setTimeout(() => setCopiedToast(null), 3500);
+      toast.error(sanitizeUserErrorMessage(err?.message, 'Error rejecting'));
     } finally {
       setIsReviewing(false);
     }
@@ -541,44 +844,50 @@ export default function ChallengeDetailScreen() {
   // Determine current submission state for UI
   const isOneTimeApproved = !isDaily && latestCompletion?.status === 'approved';
   const isOneTimePending = !isDaily && latestCompletion?.status === 'pending';
+  const isOneTimeRejected = !isDaily && latestCompletion?.status === 'rejected';
   const isTodayApproved = isDaily && todayCompletion?.status === 'approved';
   const isTodayPending = isDaily && todayCompletion?.status === 'pending';
   const isTodayRejected = isDaily && todayCompletion?.status === 'rejected';
+
+  const isTodayResubmissionPending = isTodayPending && isResubmission(todayCompletion);
+  const isOneTimeResubmissionPending = isOneTimePending && isResubmission(latestCompletion);
+
+  const todayGraceStatus = getResubmissionGraceStatus(todayCompletion?.reviewed_at, currentTimeMs);
+  const oneTimeGraceStatus = getResubmissionGraceStatus(latestCompletion?.reviewed_at, currentTimeMs);
+  const targetCompletionForDate = isDaily
+    ? userSubmissions.find((c) => c.completion_date === selectedDate)
+    : latestCompletion;
+  const isModalResubmission = targetCompletionForDate?.status === 'rejected';
+  const modalGraceStatus = getResubmissionGraceStatus(targetCompletionForDate?.reviewed_at, currentTimeMs);
 
   return (
     <View style={styles.root}>
       <StatusBar style="light" />
 
-      {/* Floating feedback toast */}
-      {copiedToast ? (
-        <View style={[styles.toastContainer, { top: insets.top + DD.s6 }]}>
-          <Text style={styles.toastText}>{copiedToast}</Text>
-        </View>
-      ) : null}
 
-      {/* Back button floating header */}
-      <View style={[styles.navBar, { paddingTop: insets.top + DD.s2 }]}>
+      {/* Header navigation bar */}
+      <View style={[styles.navBar, { paddingTop: insets.top + DD_SPACING.xs }]}>
         <Pressable
           onPress={handleBack}
-          style={({ pressed }) => [styles.backPill, pressed && { opacity: 0.75 }]}
+          android_ripple={{ color: 'rgba(255, 255, 255, 0.12)', borderless: true, radius: 24 }}
+          style={styles.navIconButton}
           accessibilityRole="button"
           accessibilityLabel="Go back">
-          <Text style={styles.backPillText}>← Back</Text>
+          <DDIcon name="arrow-left" size={20} color={DD_COLORS.text} weight="bold" />
         </Pressable>
 
         <View style={styles.navRight}>
           <Pressable
             onPress={handleShare}
-            style={({ pressed }) => [styles.shareNavBtn, pressed && { opacity: 0.75 }]}
+            android_ripple={{ color: 'rgba(255, 255, 255, 0.12)', borderless: true, radius: 24 }}
+            style={styles.navIconButton}
             accessibilityRole="button"
             accessibilityLabel="Share challenge">
-            <Text style={styles.shareNavBtnText}>📤 Share</Text>
+            <DDIcon name="share" size={20} color={DD_COLORS.text} weight="bold" />
           </Pressable>
 
           {challenge.joined && (
-            <View style={styles.joinedPill}>
-              <Text style={styles.joinedPillText}>✓ Joined</Text>
-            </View>
+            <DDBadge label="Joined" variant="success" size="sm" icon="check" />
           )}
         </View>
       </View>
@@ -587,233 +896,475 @@ export default function ChallengeDetailScreen() {
         style={styles.scroll}
         contentContainerStyle={[
           styles.content,
-          { paddingBottom: insets.bottom + 160 },
+          { paddingBottom: insets.bottom + 110 },
         ]}
         showsVerticalScrollIndicator={false}>
-        {/* Hero section */}
-        <View style={[styles.hero, { borderBottomColor: catColor }]}>
-          <View style={[styles.categoryTag, { backgroundColor: catColor + '22' }]}>
-            <Text style={[styles.categoryTagText, { color: catColor }]}>
-              {emoji} {challenge.category} • {isDaily ? 'Daily Dare' : 'One-Time Dare'}
-            </Text>
+        {/* A. Challenge Hero Section */}
+        <View style={[styles.heroCard, { borderColor: catColor + '44' }]}>
+          <View style={[styles.heroAccentBar, { backgroundColor: catColor }]} />
+
+          <View style={styles.heroBody}>
+            {/* Badges Row */}
+            <View style={styles.heroBadgesRow}>
+              <View style={[styles.categoryPill, { backgroundColor: catColor + '1E' }]}>
+                <DDIcon name={catIcon} size={13} color={catColor} weight="fill" />
+                <DDText variant="caption" style={[styles.categoryPillText, { color: catColor }]}>
+                  {challenge.category}
+                </DDText>
+              </View>
+
+              <View style={styles.typePill}>
+                <DDIcon
+                  name={isDaily ? 'flame' : 'target'}
+                  size={12}
+                  color={isDaily ? DD_COLORS.lime : DD_COLORS.purple}
+                  weight="bold"
+                />
+                <DDText
+                  variant="caption"
+                  color={isDaily ? 'lime' : 'purple'}
+                  style={styles.typePillText}>
+                  {isDaily ? 'Daily Dare' : 'One-Time Dare'}
+                </DDText>
+              </View>
+
+              <View style={styles.proofMethodPill}>
+                <DDIcon
+                  name={
+                    proofMethod === 'physical_action'
+                      ? 'shield-check'
+                      : proofMethod === 'photo_code'
+                        ? 'sparkle'
+                        : proofMethod === 'numeric_entry'
+                          ? 'target'
+                          : proofMethod === 'text_log'
+                            ? 'compass'
+                            : 'verify'
+                  }
+                  size={12}
+                  color={DD_COLORS.info}
+                  weight="bold"
+                />
+                <DDText variant="caption" customColor={DD_COLORS.info} style={styles.proofMethodPillText}>
+                  {proofMethod === 'physical_action'
+                    ? 'Gesture + Code'
+                    : proofMethod === 'photo_code'
+                      ? 'Photo + Code'
+                      : proofMethod === 'numeric_entry'
+                        ? 'Number Entry'
+                        : proofMethod === 'text_log'
+                          ? 'Written Log'
+                          : 'Peer Vouch'}
+                </DDText>
+              </View>
+            </View>
+
+            {/* Title */}
+            <DDText variant="display" color="primary" style={styles.heroTitle}>
+              {challenge.title}
+            </DDText>
+
+            {/* Creator Attribution */}
+            <View style={styles.creatorRow}>
+              <DDAvatar name={challenge.creator} size="sm" />
+              <View style={styles.creatorMeta}>
+                <DDText variant="caption" color="muted">
+                  Created by
+                </DDText>
+                <DDText variant="label" color="primary" bold>
+                  {challenge.creator}
+                </DDText>
+              </View>
+            </View>
           </View>
-          <Text style={styles.title}>{challenge.title}</Text>
-          <Text style={styles.creatorText}>by {challenge.creator}</Text>
         </View>
 
-        {/* Stats grid */}
+        {/* B. Stats Grid */}
         <View style={styles.statsGrid}>
-          <DetailStat
-            icon="👥"
-            value={formatParticipants(challenge.participants)}
-            label="Challengers"
-            color={DD.purple}
-          />
-          <DetailStat
-            icon="⏱"
-            value={timeLeft}
-            label="Time left"
-            color={DD.catFun}
-          />
-          <DetailStat
-            icon="📅"
-            value={`${challenge.durationDays}d`}
-            label="Duration"
-            color={DD.lime}
-          />
+          <DDCard variant="card" padding="sm" style={styles.statBox}>
+            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(155, 89, 255, 0.12)' }]}>
+              <DDIcon name="users" size={16} color={DD_COLORS.purple} weight="bold" />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statValue}>
+              {formatParticipants(challenge.participants)}
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Challengers
+            </DDText>
+          </DDCard>
+
+          <DDCard variant="card" padding="sm" style={styles.statBox}>
+            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(255, 60, 172, 0.12)' }]}>
+              <DDIcon name="clock" size={16} color={DD_COLORS.catFun} weight="bold" />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statValue}>
+              {timeLeft}
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Remaining
+            </DDText>
+          </DDCard>
+
+          <DDCard variant="card" padding="sm" style={styles.statBox}>
+            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(191, 253, 64, 0.12)' }]}>
+              <DDIcon name="calendar" size={16} color={DD_COLORS.lime} weight="bold" />
+            </View>
+            <DDText variant="h2" color="primary" style={styles.statValue}>
+              {challenge.durationDays}d
+            </DDText>
+            <DDText variant="caption" color="secondary" style={styles.statLabel}>
+              Duration
+            </DDText>
+          </DDCard>
         </View>
 
-        {/* Verified Progress Section */}
-        <View style={styles.section}>
+        {/* C. Verified Progress Section */}
+        <DDCard variant="card" padding="md" style={styles.sectionCard}>
           <View style={styles.progressHeader}>
-            <View>
-              <Text style={styles.sectionTitle}>
-                {challenge.joined ? 'Verified Progress' : 'Challenge Progress'}
-              </Text>
+            <View style={styles.progressHeaderLeft}>
+              <DDText variant="h3" color="primary">
+                {challenge.joined ? 'Verified Progress' : 'Challenge Timeline'}
+              </DDText>
               {displayStreak > 0 && (
                 <View style={styles.streakBadge}>
-                  <Text style={styles.streakText}>🔥 {displayStreak} Day Streak</Text>
+                  <DDIcon name="flame" size={14} color={DD_COLORS.lime} weight="fill" />
+                  <DDText variant="caption" color="lime" bold style={styles.streakText}>
+                    {displayStreak} Day Streak
+                  </DDText>
                 </View>
               )}
             </View>
-            <Text style={[styles.progressPct, { color: catColor }]}>
+            <DDText variant="h2" style={[styles.progressPctText, { color: catColor }]}>
               {displayProgressPct}%
-            </Text>
+            </DDText>
           </View>
 
+          {/* Progress Track */}
           <View style={styles.progressTrack}>
             <View
               style={[
                 styles.progressFill,
-                { width: `${displayProgressPct}%` as any, backgroundColor: catColor },
+                { width: `${Math.min(100, Math.max(0, displayProgressPct))}%` as any, backgroundColor: catColor },
               ]}
             />
           </View>
 
           <View style={styles.progressSubrow}>
-            <Text style={styles.progressLabel}>
+            <DDText variant="bodySm" color="secondary">
               {challenge.joined && participantProgress
                 ? isDaily
                   ? `${displayVerifiedCount} of ${challenge.durationDays} days verified`
                   : `${displayVerifiedCount > 0 ? '1 of 1' : '0 of 1'} dare verified`
                 : `${daysElapsed} of ${challenge.durationDays} days elapsed`}
-            </Text>
+            </DDText>
             {isCompletedVerified && (
-              <Text style={styles.completedBadgeText}>🏆 Completed!</Text>
+              <View style={styles.completedBadge}>
+                <DDIcon name="trophy" size={13} color={DD_COLORS.lime} weight="fill" />
+                <DDText variant="caption" color="lime" bold>
+                  Completed!
+                </DDText>
+              </View>
             )}
           </View>
 
           {challenge.joined && (
-            <Text style={styles.progressDisclaimer}>
-              ℹ️ Only verifier-approved submissions count toward your verified progress and streak.
-            </Text>
+            <View style={styles.disclaimerRow}>
+              <DDIcon name="info" size={13} color={DD_COLORS.textMuted} weight="bold" />
+              <DDText variant="caption" color="muted" style={styles.disclaimerText}>
+                Only verifier-approved submissions count toward your verified progress and streak.
+              </DDText>
+            </View>
           )}
-        </View>
+        </DDCard>
 
-        {/* PEER VERIFICATION & SUBMIT COMPLETION ACTION (For active participants) */}
+        {/* D. Peer Verification & Submit Section (for active participants) */}
         {challenge.joined && (
-          <View style={styles.submissionSectionCard}>
+          <DDCard variant="highlight" padding="md" style={styles.submissionSectionCard}>
             <View style={styles.cardHeaderRow}>
-              <View>
-                <View style={styles.badgeRow}>
-                  <Text style={styles.verificationBadge}>PEER VERIFICATION</Text>
-                  <Text style={styles.whatsappBadge}>💬 WhatsApp Proof</Text>
-                </View>
-                <Text style={styles.cardMainTitle}>Submit Challenge Completion</Text>
+              <View style={styles.verificationBadgesRow}>
+                <DDBadge label="Peer Verification" variant="purple" size="sm" icon="verify" />
+                {isProofCodeRequired ? (
+                  <DDBadge label="WhatsApp Proof" variant="lime" size="sm" icon="share" />
+                ) : proofMethod === 'numeric_entry' ? (
+                  <DDBadge label="Numeric Metric" variant="lime" size="sm" icon="target" />
+                ) : proofMethod === 'text_log' ? (
+                  <DDBadge label="Written Log" variant="lime" size="sm" icon="compass" />
+                ) : (
+                  <DDBadge label="Peer Vouch" variant="lime" size="sm" icon="check" />
+                )}
               </View>
+              <DDText variant="h3" color="primary" style={styles.cardMainTitle}>
+                Submit Dare Proof
+              </DDText>
             </View>
 
-            <Text style={styles.cardDescription}>
-              Submissions require peer verification. Submit below, then send your proof photo or video to your assigned verifier via WhatsApp. Progress counts once approved.
-            </Text>
+            <DDText variant="bodySm" color="secondary" style={styles.cardDescription}>
+              {isProofCodeRequired
+                ? 'Submissions require peer verification. Submit completion below, then send your proof photo or video to your assigned verifier via WhatsApp.'
+                : 'Submissions require peer verification. Submit your completion details below for your assigned verifier to review.'}
+            </DDText>
 
             {/* Daily Challenge Today Status Callouts */}
             {isDaily && isTodayApproved && (
-              <View style={[styles.statusBanner, styles.statusBannerApproved]}>
-                <Text style={styles.statusBannerIcon}>✅</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.statusBannerTitle}>Today is Verified!</Text>
-                  <Text style={styles.statusBannerSub}>
+              <View style={[styles.statusCallout, styles.statusCalloutApproved]}>
+                <DDIcon name="check-circle" size={20} color={DD_COLORS.success} weight="fill" />
+                <View style={styles.calloutTexts}>
+                  <DDText variant="label" color="success" bold>
+                    Today is Verified!
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
                     Your completion for today ({todayDate}) has been approved by your verifier.
-                  </Text>
+                  </DDText>
                 </View>
               </View>
             )}
 
             {isDaily && isTodayPending && (
-              <View style={[styles.statusBanner, styles.statusBannerPending]}>
-                <Text style={styles.statusBannerIcon}>⏳</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.statusBannerTitle}>Today is Pending Verification</Text>
-                  <Text style={styles.statusBannerSub}>
+              <View
+                style={[
+                  styles.statusCallout,
+                  isTodayResubmissionPending ? styles.statusCalloutResubmission : styles.statusCalloutPending,
+                ]}>
+                <DDIcon
+                  name={isTodayResubmissionPending ? 'refresh' : 'clock'}
+                  size={20}
+                  color={isTodayResubmissionPending ? DD_COLORS.coral : DD_COLORS.warning}
+                  weight="bold"
+                />
+                <View style={styles.calloutTexts}>
+                  <DDText
+                    variant="label"
+                    color={isTodayResubmissionPending ? 'coral' : 'warning'}
+                    bold>
+                    {isTodayResubmissionPending
+                      ? 'Today’s Resubmission Pending Review'
+                      : 'Today is Pending Verification'}
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
                     Submitted for {todayDate}. Waiting for verifier approval.
-                  </Text>
-                  {todayCompletion && (
-                    <Pressable
+                  </DDText>
+                  {isTodayResubmissionPending && todayCompletion?.last_rejection_reason ? (
+                    <DDText variant="caption" color="coral">
+                      Previous feedback: &quot;{todayCompletion.last_rejection_reason}&quot;
+                      {todayCompletion.last_reviewed_at
+                        ? ` (${formatReviewedAt(todayCompletion.last_reviewed_at)})`
+                        : ''}
+                    </DDText>
+                  ) : null}
+                  {todayCompletion && (todayCompletion.proof_code || isProofCodeRequired) && (
+                    <DDButton
+                      title="Send WhatsApp Proof"
+                      variant="secondary"
+                      size="sm"
+                      iconLeft="share"
                       onPress={() => handleSendWhatsAppProof(todayCompletion)}
-                      style={styles.remindBtn}>
-                      <Text style={styles.remindBtnText}>📲 Send WhatsApp Proof</Text>
-                    </Pressable>
+                      style={styles.calloutActionBtn}
+                    />
                   )}
                 </View>
               </View>
             )}
 
             {isDaily && isTodayRejected && (
-              <View style={[styles.statusBanner, styles.statusBannerRejected]}>
-                <Text style={styles.statusBannerIcon}>❌</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.statusBannerTitle}>Submission Needs Resubmission</Text>
-                  <Text style={styles.statusBannerSub}>
+              <View style={[styles.statusCallout, styles.statusCalloutRejected]}>
+                <DDIcon name="warning" size={20} color={DD_COLORS.danger} weight="bold" />
+                <View style={styles.calloutTexts}>
+                  <DDText variant="label" color="danger" bold>
+                    {todayGraceStatus.isUnverifiable
+                      ? 'Submission Rejected (Timestamp Unverified)'
+                      : todayGraceStatus.isExpired
+                        ? 'Submission Rejected (Window Expired)'
+                        : 'Submission Needs Resubmission'}
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
                     Reason: {todayCompletion?.rejection_reason || 'Proof was not approved.'}
-                  </Text>
+                    {todayCompletion?.reviewed_at
+                      ? ` • Reviewed ${formatReviewedAt(todayCompletion.reviewed_at)}`
+                      : ''}
+                  </DDText>
+                  <DDText
+                    variant="caption"
+                    color={todayGraceStatus.isExpired ? 'danger' : 'warning'}
+                    bold>
+                    {todayGraceStatus.isUnverifiable
+                      ? 'The rejection timestamp cannot be verified.'
+                      : todayGraceStatus.isExpired
+                        ? `48-hour resubmission window expired on ${todayGraceStatus.formattedDeadline}`
+                        : `48h window active • ${todayGraceStatus.label} (until ${todayGraceStatus.formattedDeadline})`}
+                  </DDText>
                 </View>
               </View>
             )}
 
             {/* One-Time Dare Status Callouts */}
             {!isDaily && isOneTimeApproved && (
-              <View style={[styles.statusBanner, styles.statusBannerApproved]}>
-                <Text style={styles.statusBannerIcon}>🏆</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.statusBannerTitle}>Dare Completed & Verified!</Text>
-                  <Text style={styles.statusBannerSub}>
+              <View style={[styles.statusCallout, styles.statusCalloutApproved]}>
+                <DDIcon name="trophy" size={20} color={DD_COLORS.lime} weight="fill" />
+                <View style={styles.calloutTexts}>
+                  <DDText variant="label" color="lime" bold>
+                    Dare Completed & Verified!
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
                     Your completion has been approved. You conquered this dare!
-                  </Text>
+                  </DDText>
                 </View>
               </View>
             )}
 
             {!isDaily && isOneTimePending && (
-              <View style={[styles.statusBanner, styles.statusBannerPending]}>
-                <Text style={styles.statusBannerIcon}>⏳</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.statusBannerTitle}>Dare Submission Pending Review</Text>
-                  <Text style={styles.statusBannerSub}>
+              <View
+                style={[
+                  styles.statusCallout,
+                  isOneTimeResubmissionPending ? styles.statusCalloutResubmission : styles.statusCalloutPending,
+                ]}>
+                <DDIcon
+                  name={isOneTimeResubmissionPending ? 'refresh' : 'clock'}
+                  size={20}
+                  color={isOneTimeResubmissionPending ? DD_COLORS.coral : DD_COLORS.warning}
+                  weight="bold"
+                />
+                <View style={styles.calloutTexts}>
+                  <DDText
+                    variant="label"
+                    color={isOneTimeResubmissionPending ? 'coral' : 'warning'}
+                    bold>
+                    {isOneTimeResubmissionPending
+                      ? 'Dare Resubmission Pending Review'
+                      : 'Dare Submission Pending Review'}
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
                     Your completion is currently awaiting review by your verifier.
-                  </Text>
-                  {latestCompletion && (
-                    <Pressable
+                  </DDText>
+                  {isOneTimeResubmissionPending && latestCompletion?.last_rejection_reason ? (
+                    <DDText variant="caption" color="coral">
+                      Previous feedback: &quot;{latestCompletion.last_rejection_reason}&quot;
+                      {latestCompletion.last_reviewed_at
+                        ? ` (${formatReviewedAt(latestCompletion.last_reviewed_at)})`
+                        : ''}
+                    </DDText>
+                  ) : null}
+                  {latestCompletion && (latestCompletion.proof_code || isProofCodeRequired) && (
+                    <DDButton
+                      title="Send WhatsApp Proof"
+                      variant="secondary"
+                      size="sm"
+                      iconLeft="share"
                       onPress={() => handleSendWhatsAppProof(latestCompletion)}
-                      style={styles.remindBtn}>
-                      <Text style={styles.remindBtnText}>📲 Send WhatsApp Proof</Text>
-                    </Pressable>
+                      style={styles.calloutActionBtn}
+                    />
                   )}
                 </View>
               </View>
             )}
 
-            {/* Main Submit Button */}
-            {(!isOneTimeApproved && !isOneTimePending) && (
-              <View style={styles.submitActionBox}>
-                <Pressable
-                  onPress={() => openSubmitModal()}
-                  style={({ pressed }) => [
-                    styles.primarySubmitBtn,
-                    pressed && { opacity: 0.88, transform: [{ scale: 0.98 }] },
-                  ]}
-                  accessibilityRole="button"
-                  accessibilityLabel="Submit Completion">
-                  <Text style={styles.primarySubmitBtnText}>
-                    {isTodayApproved
-                      ? '⚡ Submit Another Day'
-                      : isTodayRejected
-                        ? '🔄 Resubmit Today’s Completion'
-                        : '⚡ Submit Completion'}
-                  </Text>
-                </Pressable>
+            {!isDaily && isOneTimeRejected && (
+              <View style={[styles.statusCallout, styles.statusCalloutRejected]}>
+                <DDIcon name="warning" size={20} color={DD_COLORS.danger} weight="bold" />
+                <View style={styles.calloutTexts}>
+                  <DDText variant="label" color="danger" bold>
+                    {oneTimeGraceStatus.isUnverifiable
+                      ? 'Dare Rejected (Timestamp Unverified)'
+                      : oneTimeGraceStatus.isExpired
+                        ? 'Dare Rejected (Window Expired)'
+                        : 'Dare Needs Resubmission'}
+                  </DDText>
+                  <DDText variant="caption" color="secondary">
+                    Reason: {latestCompletion?.rejection_reason || 'Proof was not approved.'}
+                    {latestCompletion?.reviewed_at
+                      ? ` • Reviewed ${formatReviewedAt(latestCompletion.reviewed_at)}`
+                      : ''}
+                  </DDText>
+                  <DDText
+                    variant="caption"
+                    color={oneTimeGraceStatus.isExpired ? 'danger' : 'warning'}
+                    bold>
+                    {oneTimeGraceStatus.isUnverifiable
+                      ? 'The rejection timestamp cannot be verified. Resubmission is unavailable.'
+                      : oneTimeGraceStatus.isExpired
+                        ? `48-hour resubmission window expired on ${oneTimeGraceStatus.formattedDeadline}`
+                        : `48h window active • ${oneTimeGraceStatus.label} (until ${oneTimeGraceStatus.formattedDeadline})`}
+                  </DDText>
+                </View>
+              </View>
+            )}
 
-                {/* Quick option to submit yesterday for daily dare grace window */}
+            {/* Main Submit Action Buttons */}
+            {!isOneTimeApproved && !isOneTimePending && (
+              <View style={styles.submitActionBox}>
+                <DDButton
+                  title={
+                    isDaily
+                      ? isTodayApproved
+                        ? 'Submit Another Day'
+                        : isTodayRejected
+                          ? todayGraceStatus.isExpired
+                            ? todayGraceStatus.isUnverifiable
+                              ? 'Timestamp Unverified'
+                              : 'Resubmission Window Expired'
+                            : 'Resubmit Today’s Completion'
+                          : 'Submit Completion'
+                      : isOneTimeRejected
+                        ? oneTimeGraceStatus.isExpired
+                          ? oneTimeGraceStatus.isUnverifiable
+                            ? 'Timestamp Unverified'
+                            : 'Resubmission Window Expired'
+                          : 'Resubmit Dare'
+                        : 'Submit Completion'
+                  }
+                  variant={
+                    (isDaily && isTodayRejected && todayGraceStatus.isExpired) ||
+                    (!isDaily && isOneTimeRejected && oneTimeGraceStatus.isExpired)
+                      ? 'outline'
+                      : 'primary'
+                  }
+                  disabled={
+                    (isDaily && isTodayRejected && todayGraceStatus.isExpired) ||
+                    (!isDaily && isOneTimeRejected && oneTimeGraceStatus.isExpired)
+                  }
+                  iconLeft={
+                    (isDaily && isTodayRejected) || (!isDaily && isOneTimeRejected)
+                      ? 'refresh'
+                      : 'plus'
+                  }
+                  onPress={() => openSubmitModal()}
+                  fullWidth
+                />
+
                 {isDaily && !yesterdayCompletion && isTodayApproved && (
-                  <Pressable
+                  <DDButton
+                    title={`Submit for Yesterday (${yesterdayDate})`}
+                    variant="outline"
+                    size="sm"
+                    iconLeft="clock"
                     onPress={() => openSubmitModal(yesterdayDate)}
-                    style={styles.yesterdayBtn}>
-                    <Text style={styles.yesterdayBtnText}>
-                      ⏮️ Submit for Yesterday ({yesterdayDate})
-                    </Text>
-                  </Pressable>
+                    style={styles.yesterdaySubmitBtn}
+                  />
                 )}
               </View>
             )}
-          </View>
+          </DDCard>
         )}
 
-        {/* SUBMISSIONS AWAITING REVIEW (for assigned verifiers) */}
+        {/* E. Submissions Awaiting Your Review (for assigned verifiers) */}
         {reviewableSubmissions.length > 0 && (
-          <View style={styles.reviewSectionCard}>
+          <DDCard variant="card" padding="md" style={styles.sectionCard}>
             <View style={styles.reviewSectionHeader}>
-              <View style={styles.reviewTitleRow}>
-                <Text style={styles.reviewIcon}>📋</Text>
-                <Text style={styles.reviewMainTitle}>Awaiting Your Review</Text>
-              </View>
-              <View style={styles.reviewBadge}>
-                <Text style={styles.reviewBadgeText}>{reviewableSubmissions.length} Pending</Text>
+              <View style={styles.reviewTitleGroup}>
+                <DDIcon name="verify" size={20} color={DD_COLORS.coral} weight="fill" />
+                <DDText variant="h3" color="primary">
+                  Awaiting Your Review
+                </DDText>
+                <DDBadge
+                  label={`${reviewableSubmissions.length} Pending`}
+                  variant="coral"
+                  size="sm"
+                />
               </View>
             </View>
 
-            <Text style={styles.reviewSubtext}>
+            <DDText variant="bodySm" color="secondary" style={styles.reviewSubtext}>
               You were selected as verifier for these completions. Confirm that the challenger sent you proof before approving.
-            </Text>
+            </DDText>
 
             <View style={styles.reviewList}>
               {reviewableSubmissions.map((item) => {
@@ -821,75 +1372,108 @@ export default function ChallengeDetailScreen() {
                 return (
                   <View key={item.id} style={styles.reviewItemCard}>
                     <View style={styles.reviewItemTop}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.reviewSubmitterName}>{submitterName}</Text>
-                        <Text style={styles.reviewDateText}>
-                          Date: {item.completion_date} • {formatSubmittedAt(item.submitted_at)}
-                        </Text>
+                      <DDAvatar name={submitterName} size="sm" />
+                      <View style={styles.reviewItemMeta}>
+                        <DDText variant="label" color="primary" bold numberOfLines={1}>
+                          {submitterName}
+                        </DDText>
+                        <DDText variant="caption" color="muted">
+                          {item.completion_date} • {formatSubmittedAt(item.submitted_at)}
+                        </DDText>
                       </View>
-                      <View style={[styles.badgePill, styles.badgePending]}>
-                        <Text style={styles.badgePendingText}>⏳ Pending</Text>
+                      <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+                        {isResubmission(item) && (
+                          <DDBadge label="Resubmission" variant="coral" size="sm" icon="refresh" />
+                        )}
+                        <DDBadge label="Pending" variant="warning" size="sm" icon="clock" />
                       </View>
                     </View>
 
                     {item.submission_note ? (
                       <View style={styles.reviewNoteBox}>
-                        <Text style={styles.reviewNoteText}>&quot;{item.submission_note}&quot;</Text>
+                        <DDText variant="caption" color="secondary" style={styles.reviewNoteText}>
+                          &quot;{item.submission_note}&quot;
+                        </DDText>
                       </View>
                     ) : null}
 
-                    {/* Review actions */}
+                    {isResubmission(item) && item.last_rejection_reason ? (
+                      <View style={styles.reviewPrevFeedbackBox}>
+                        <DDText variant="caption" color="coral" numberOfLines={2}>
+                          Previous feedback: &quot;{item.last_rejection_reason}&quot;
+                          {item.last_reviewed_at ? ` (${formatReviewedAt(item.last_reviewed_at)})` : ''}
+                        </DDText>
+                      </View>
+                    ) : null}
+
+                    {item.numeric_value !== null && item.numeric_value !== undefined ? (
+                      <View style={styles.reviewProofBox}>
+                        <DDIcon name="target" size={13} color={DD_COLORS.lime} weight="bold" />
+                        <DDText variant="caption" color="lime" bold style={{ marginLeft: 4 }}>
+                          Recorded Metric: {item.numeric_value} {challenge?.proofConfig?.unit || ''}
+                        </DDText>
+                      </View>
+                    ) : null}
+
+                    {item.text_entry ? (
+                      <View style={styles.reviewProofBox}>
+                        <DDIcon name="compass" size={13} color={DD_COLORS.textMuted} weight="bold" />
+                        <DDText variant="caption" color="secondary" style={{ marginLeft: 4 }} numberOfLines={3}>
+                          &quot;{item.text_entry}&quot;
+                        </DDText>
+                      </View>
+                    ) : null}
+
+                    {/* Review Actions Row */}
                     <View style={styles.reviewButtonsRow}>
-                      <Pressable
+                      <DDButton
+                        title="Approve"
+                        variant="primary"
+                        size="sm"
+                        iconLeft="check"
+                        loading={isReviewing}
                         onPress={() => handleQuickApprove(item)}
-                        disabled={isReviewing}
-                        style={({ pressed }) => [
-                          styles.quickApproveBtn,
-                          pressed && { opacity: 0.8 },
-                          isReviewing && { opacity: 0.6 },
-                        ]}
-                        accessibilityRole="button"
-                        accessibilityLabel="Approve submission">
-                        <Text style={styles.quickApproveText}>✓ Approve</Text>
-                      </Pressable>
+                        style={styles.reviewBtnFlex}
+                      />
 
-                      <Pressable
+                      <DDButton
+                        title="Reject"
+                        variant="destructive"
+                        size="sm"
+                        iconLeft="x"
+                        disabled={isReviewing}
                         onPress={() => openInlineRejectModal(item)}
-                        disabled={isReviewing}
-                        style={({ pressed }) => [
-                          styles.quickRejectBtn,
-                          pressed && { opacity: 0.8 },
-                          isReviewing && { opacity: 0.6 },
-                        ]}
-                        accessibilityRole="button"
-                        accessibilityLabel="Reject submission">
-                        <Text style={styles.quickRejectText}>✕ Reject</Text>
-                      </Pressable>
+                        style={styles.reviewBtnFlex}
+                      />
 
-                      <Pressable
+                      <DDButton
+                        title="Details"
+                        variant="ghost"
+                        size="sm"
+                        iconRight="arrow-right"
                         onPress={() =>
                           router.push({
                             pathname: '/review/[id]',
                             params: { id: item.id },
                           })
                         }
-                        style={styles.detailsReviewBtn}>
-                        <Text style={styles.detailsReviewBtnText}>Details →</Text>
-                      </Pressable>
+                      />
                     </View>
                   </View>
                 );
               })}
             </View>
-          </View>
+          </DDCard>
         )}
 
-        {/* SUBMISSION HISTORY & STATUS LIST (User's own records) */}
+        {/* F. Submissions & History (User's own records) */}
         {challenge.joined && userSubmissions.length > 0 && (
-          <View style={styles.historyCard}>
+          <DDCard variant="card" padding="md" style={styles.sectionCard}>
             <View style={styles.historyHeader}>
-              <Text style={styles.historyTitle}>Your Submissions & History</Text>
-              <Text style={styles.historyCount}>{userSubmissions.length} logged</Text>
+              <DDText variant="h3" color="primary">
+                Your Submission History
+              </DDText>
+              <DDBadge label={`${userSubmissions.length} logged`} variant="neutral" size="sm" />
             </View>
 
             <View style={styles.historyList}>
@@ -903,240 +1487,294 @@ export default function ChallengeDetailScreen() {
                   <View key={item.id} style={styles.historyItem}>
                     <View style={styles.historyItemTop}>
                       <View>
-                        <Text style={styles.historyDate}>
+                        <DDText variant="label" color="primary" bold>
                           {item.completion_date === todayDate
                             ? `Today (${item.completion_date})`
                             : item.completion_date === yesterdayDate
                               ? `Yesterday (${item.completion_date})`
                               : item.completion_date}
-                        </Text>
-                        <Text style={styles.historyVerifier}>
+                        </DDText>
+                        <DDText variant="caption" color="muted">
                           Verifier: {verifierName}
-                        </Text>
+                        </DDText>
                       </View>
 
                       {/* Status Badges */}
                       {item.status === 'approved' && (
-                        <View style={[styles.badgePill, styles.badgeApproved]}>
-                          <Text style={styles.badgeApprovedText}>✓ Approved</Text>
-                        </View>
+                        <DDBadge label="Approved" variant="success" size="sm" icon="check-circle" />
                       )}
                       {item.status === 'pending' && (
-                        <View style={[styles.badgePill, styles.badgePending]}>
-                          <Text style={styles.badgePendingText}>⏳ Pending</Text>
+                        <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+                          {isResubmission(item) && (
+                            <DDBadge label="Resubmitted" variant="coral" size="sm" icon="refresh" />
+                          )}
+                          <DDBadge label="Pending" variant="warning" size="sm" icon="clock" />
                         </View>
                       )}
-                      {item.status === 'rejected' && (
-                        <View style={[styles.badgePill, styles.badgeRejected]}>
-                          <Text style={styles.badgeRejectedText}>❌ Rejected</Text>
-                        </View>
-                      )}
+                      {item.status === 'rejected' && (() => {
+                        const grace = getResubmissionGraceStatus(item.reviewed_at, currentTimeMs);
+                        return (
+                          <View style={{ flexDirection: 'row', gap: 4, alignItems: 'center' }}>
+                            <DDBadge label="Rejected" variant="danger" size="sm" icon="x-circle" />
+                            {grace.isUnverifiable ? (
+                              <DDBadge label="Unverifiable" variant="neutral" size="sm" icon="x-circle" />
+                            ) : grace.isExpired ? (
+                              <DDBadge label="Expired" variant="neutral" size="sm" icon="clock" />
+                            ) : (
+                              <DDBadge label={grace.label} variant="warning" size="sm" icon="clock" />
+                            )}
+                          </View>
+                        );
+                      })()}
                     </View>
 
                     {item.submission_note ? (
-                      <Text style={styles.historyNote}>
+                      <DDText variant="caption" color="secondary" style={styles.historyNote}>
                         Note: &quot;{item.submission_note}&quot;
-                      </Text>
+                      </DDText>
                     ) : null}
 
                     {item.rejection_reason && item.status === 'rejected' ? (
-                      <Text style={styles.rejectionReasonText}>
+                      <DDText variant="caption" color="danger" style={styles.rejectionReasonText}>
                         Feedback: {item.rejection_reason}
-                      </Text>
+                        {item.reviewed_at
+                          ? ` • Reviewed ${formatReviewedAt(item.reviewed_at)}`
+                          : ' • Rejection timestamp cannot be verified'}
+                      </DDText>
                     ) : null}
 
-                    {/* Actions on items */}
+                    {item.status === 'pending' && isResubmission(item) && item.last_rejection_reason ? (
+                      <DDText variant="caption" color="coral" style={styles.rejectionReasonText}>
+                        Previous Feedback: {item.last_rejection_reason}
+                        {item.last_reviewed_at ? ` • Reviewed ${formatReviewedAt(item.last_reviewed_at)}` : ''}
+                      </DDText>
+                    ) : null}
+
+                    {item.numeric_value !== null && item.numeric_value !== undefined ? (
+                      <DDText variant="caption" color="lime" style={styles.historyMetricText}>
+                        Metric: {item.numeric_value} {challenge?.proofConfig?.unit || ''}
+                      </DDText>
+                    ) : null}
+
+                    {item.text_entry ? (
+                      <DDText variant="caption" color="secondary" style={styles.historyLogText} numberOfLines={2}>
+                        Log: &quot;{item.text_entry}&quot;
+                      </DDText>
+                    ) : null}
+
+                    {/* Actions on history items */}
                     <View style={styles.historyActionsRow}>
                       {item.status === 'pending' && (
                         <>
-                          <Pressable
-                            onPress={() => handleSendWhatsAppProof(item)}
-                            style={styles.historyActionBtn}>
-                            <Text style={styles.historyActionBtnText}>💬 WhatsApp Proof</Text>
-                          </Pressable>
-                          <Pressable
+                          {(item.proof_code || isProofCodeRequired) && (
+                            <DDButton
+                              title="WhatsApp Proof"
+                              variant="secondary"
+                              size="sm"
+                              iconLeft="share"
+                              onPress={() => handleSendWhatsAppProof(item)}
+                            />
+                          )}
+                          <DDButton
+                            title="Reassign Verifier"
+                            variant="outline"
+                            size="sm"
+                            iconLeft="refresh"
                             onPress={() => openReassignModal(item)}
-                            style={styles.historyActionBtnSecondary}>
-                            <Text style={styles.historyActionBtnSecondaryText}>
-                              🔄 Reassign Verifier
-                            </Text>
-                          </Pressable>
+                          />
                         </>
                       )}
 
-                      {item.status === 'rejected' && (
-                        <Pressable
-                          onPress={() => openSubmitModal(item.completion_date)}
-                          style={styles.historyActionBtn}>
-                          <Text style={styles.historyActionBtnText}>🔄 Resubmit for this date</Text>
-                        </Pressable>
-                      )}
+                      {item.status === 'rejected' && (() => {
+                        const grace = getResubmissionGraceStatus(item.reviewed_at, currentTimeMs);
+                        if (grace.isUnverifiable) {
+                          return (
+                            <DDButton
+                              title="Timestamp Unverified"
+                              variant="outline"
+                              size="sm"
+                              disabled
+                              style={{ opacity: 0.5 }}
+                            />
+                          );
+                        }
+                        if (grace.isExpired) {
+                          return (
+                            <DDButton
+                              title="Resubmission Expired (48h)"
+                              variant="outline"
+                              size="sm"
+                              disabled
+                              style={{ opacity: 0.5 }}
+                            />
+                          );
+                        }
+                        return (
+                          <DDButton
+                            title="Resubmit for this date"
+                            variant="primary"
+                            size="sm"
+                            iconLeft="refresh"
+                            onPress={() => openSubmitModal(item.completion_date)}
+                          />
+                        );
+                      })()}
                     </View>
                   </View>
                 );
               })}
             </View>
-          </View>
+          </DDCard>
         )}
 
-        {/* Invite Friends Card */}
-        <View style={styles.inviteCard}>
+        {/* G. Invite Challengers Section */}
+        <DDCard variant="card" padding="md" style={styles.sectionCard}>
           <View style={styles.inviteHeader}>
-            <View>
-              <Text style={styles.inviteTitle}>Invite Challengers</Text>
-              <Text style={styles.inviteSubtitle}>
+            <View style={styles.inviteHeaderLeft}>
+              <View style={styles.inviteTitleRow}>
+                <DDIcon name="friends" size={18} color={DD_COLORS.lime} weight="fill" />
+                <DDText variant="h3" color="primary">
+                  Invite Challengers
+                </DDText>
+              </View>
+              <DDText variant="bodySm" color="secondary">
                 Dares are 3x more likely to be completed with friends.
-              </Text>
+              </DDText>
             </View>
-            <Text style={styles.inviteBadge}>🔥 Active</Text>
           </View>
 
           <View style={styles.inviteButtonsRow}>
-            <Pressable
+            <DDButton
+              title="Copy Link"
+              variant="secondary"
+              size="sm"
+              iconLeft="copy"
               onPress={handleCopy}
-              style={({ pressed }) => [
-                styles.inviteBtn,
-                styles.inviteBtnCopy,
-                pressed && { opacity: 0.85 },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="Copy invite link">
-              <Text style={styles.inviteBtnCopyText}>🔗 Copy Link</Text>
-            </Pressable>
+              style={styles.inviteBtnFlex}
+            />
 
-            <Pressable
+            <DDButton
+              title="Share Dare"
+              variant="secondary"
+              size="sm"
+              iconLeft="share"
               onPress={handleShare}
-              style={({ pressed }) => [
-                styles.inviteBtn,
-                styles.inviteBtnShare,
-                pressed && { opacity: 0.85 },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="Native share challenge">
-              <Text style={styles.inviteBtnShareText}>📤 Share Dare</Text>
-            </Pressable>
+              style={styles.inviteBtnFlex}
+            />
 
-            <Pressable
+            <DDButton
+              title="Invite Friends"
+              variant="violet"
+              size="sm"
+              iconLeft="user-plus"
               onPress={openInviteFriendsModal}
-              style={({ pressed }) => [
-                styles.inviteBtn,
-                { backgroundColor: DD.purple + '22', borderColor: DD.purple },
-                pressed && { opacity: 0.85 },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="Invite accepted friends to challenge">
-              <Text style={[styles.inviteBtnShareText, { color: DD.purple }]}>👥 Invite Friends</Text>
-            </Pressable>
+              style={styles.inviteBtnFlex}
+            />
           </View>
 
-          {/* Toggle technical link details */}
+          {/* Toggle URL Details */}
           <Pressable
             onPress={() => setShowLinkInfo(!showLinkInfo)}
-            style={styles.linkInfoToggle}>
-            <Text style={styles.linkInfoToggleText}>
-              {showLinkInfo ? 'Hide URL details ▲' : 'Show URL & deep link details ▼'}
-            </Text>
+            style={styles.linkInfoToggle}
+            accessibilityRole="button">
+            <DDText variant="caption" color="lime" bold>
+              {showLinkInfo ? 'Hide deep link details ▲' : 'Show deep link details ▼'}
+            </DDText>
           </Pressable>
 
           {showLinkInfo && (
             <View style={styles.linkDetailsBox}>
               <View style={styles.urlItem}>
-                <Text style={styles.urlLabel}>Primary Invite URL:</Text>
-                <Text style={styles.urlValue} numberOfLines={2} selectable>
+                <DDText variant="caption" color="muted">
+                  Primary Invite URL:
+                </DDText>
+                <DDText variant="caption" color="primary" numberOfLines={2} selectable>
                   {inviteUrls.primaryUrl}
-                </Text>
+                </DDText>
               </View>
               <View style={styles.urlItem}>
-                <Text style={styles.urlLabel}>Native Deep Link:</Text>
-                <Text style={styles.urlValue} numberOfLines={2} selectable>
+                <DDText variant="caption" color="muted">
+                  Native Deep Link:
+                </DDText>
+                <DDText variant="caption" color="primary" numberOfLines={2} selectable>
                   {inviteUrls.deepLink}
-                </Text>
+                </DDText>
               </View>
-              <Text style={styles.urlNote}>
-                {inviteUrls.httpsUrl
-                  ? '🌐 Public HTTPS invite link active. Anyone can open this on web or mobile.'
-                  : 'ℹ️ Using local deep link scheme (`daredrop://`). Set EXPO_PUBLIC_APP_URL in .env to enable public HTTPS links.'}
-              </Text>
             </View>
           )}
-        </View>
+        </DDCard>
 
-        {/* Description */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>About this challenge</Text>
-          <View style={styles.descriptionCard}>
-            <Text style={styles.description}>{challenge.description}</Text>
-          </View>
-        </View>
+        {/* H. Description Section */}
+        <DDCard variant="card" padding="md" style={styles.sectionCard}>
+          <DDText variant="h3" color="primary" style={styles.sectionHeading}>
+            About this challenge
+          </DDText>
+          <DDText variant="body" color="secondary" style={styles.descriptionText}>
+            {challenge.description}
+          </DDText>
+        </DDCard>
 
-        {/* Rules */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>How it works</Text>
+        {/* I. Rules / How It Works */}
+        <DDCard variant="card" padding="md" style={styles.sectionCard}>
+          <DDText variant="h3" color="primary" style={styles.sectionHeading}>
+            How it works
+          </DDText>
           <View style={styles.rulesList}>
             {[
               'Commit to the duration before joining',
               'Submit completion daily and assign a peer verifier',
-              'Share your photo or video proof directly with your verifier via WhatsApp',
+              isProofCodeRequired
+                ? 'Share your photo or video proof directly with your verifier via WhatsApp'
+                : 'Submit your completion for your assigned verifier to review in the app',
               'Only verifier-approved submissions count toward your streak and badge',
             ].map((rule, i) => (
               <View key={i} style={styles.ruleItem}>
-                <View style={[styles.ruleNumber, { backgroundColor: catColor + '22' }]}>
-                  <Text style={[styles.ruleNumberText, { color: catColor }]}>{i + 1}</Text>
+                <View style={[styles.ruleNumberCircle, { backgroundColor: catColor + '22' }]}>
+                  <DDText variant="caption" bold style={{ color: catColor }}>
+                    {i + 1}
+                  </DDText>
                 </View>
-                <Text style={styles.ruleText}>{rule}</Text>
+                <DDText variant="bodySm" color="secondary" style={styles.ruleText}>
+                  {rule}
+                </DDText>
               </View>
             ))}
           </View>
-        </View>
+        </DDCard>
       </ScrollView>
 
-      {/* CTA Bottom Bar */}
-      <View style={[styles.ctaContainer, { paddingBottom: insets.bottom + DD.s4 }]}>
+      {/* Sticky Bottom CTA Bar */}
+      <View style={[styles.ctaContainer, { paddingBottom: insets.bottom + DD_SPACING.sm }]}>
         {challenge.joined ? (
           <View style={styles.joinedCtaRow}>
-            <Pressable
+            <DDButton
+              title="Submit Completion"
+              variant="primary"
+              iconLeft="plus"
               onPress={() => openSubmitModal()}
-              style={({ pressed }) => [
-                styles.bottomSubmitBtn,
-                pressed && { opacity: 0.9, transform: [{ scale: 0.98 }] },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="Submit Completion">
-              <Text style={styles.bottomSubmitBtnText}>⚡ Submit Completion</Text>
-            </Pressable>
+              style={styles.bottomMainBtn}
+            />
 
-            <Pressable
-              onPress={handleJoinToggle}
+            <DDButton
+              title="Leave"
+              variant="ghost"
+              loading={isJoining}
               disabled={isJoining}
-              style={styles.leaveTextBtn}>
-              {isJoining ? (
-                <ActivityIndicator color={DD.textMuted} size="small" />
-              ) : (
-                <Text style={styles.leaveText}>Leave Dare</Text>
-              )}
-            </Pressable>
+              onPress={handleJoinToggle}
+              style={styles.leaveDareBtn}
+            />
           </View>
         ) : (
-          <Pressable
-            onPress={handleJoinToggle}
+          <DDButton
+            title="Join Challenge"
+            variant="primary"
+            iconLeft="plus"
+            loading={isJoining}
             disabled={isJoining}
-            style={({ pressed }) => [
-              styles.ctaButton,
-              styles.ctaButtonJoin,
-              { backgroundColor: catColor },
-              pressed && !isJoining && { opacity: 0.88, transform: [{ scale: 0.98 }] },
-              isJoining && { opacity: 0.7 },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="Join challenge">
-            {isJoining ? (
-              <ActivityIndicator color={DD.bg} size="small" />
-            ) : (
-              <Text style={[styles.ctaText, styles.ctaTextJoin]}>
-                🚀 Join Challenge
-              </Text>
-            )}
-          </Pressable>
+            onPress={handleJoinToggle}
+            fullWidth
+            style={{ backgroundColor: catColor }}
+          />
         )}
       </View>
 
@@ -1145,147 +1783,314 @@ export default function ChallengeDetailScreen() {
         visible={submitModalVisible}
         animationType="slide"
         transparent={true}
-        onRequestClose={() => setSubmitModalVisible(false)}>
+        onRequestClose={closeSubmitModal}>
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             {/* Modal Header */}
             <View style={styles.modalHeaderRow}>
-              <View>
-                <Text style={styles.modalTitle}>Submit Completion</Text>
-                <Text style={styles.modalSubtitle}>
+              <View style={styles.modalHeaderTexts}>
+                <DDText variant="h3" color="primary">
+                  {isModalResubmission
+                    ? isDaily
+                      ? 'Resubmit Completion'
+                      : 'Resubmit Dare'
+                    : isDaily
+                      ? 'Submit Completion'
+                      : 'Submit Dare'}
+                </DDText>
+                <DDText variant="caption" color="muted" numberOfLines={1}>
                   {challenge.title}
-                </Text>
+                </DDText>
               </View>
               <Pressable
-                onPress={() => setSubmitModalVisible(false)}
-                style={styles.modalCloseBtn}>
-                <Text style={styles.modalCloseBtnText}>✕</Text>
+                onPress={closeSubmitModal}
+                hitSlop={8}
+                style={styles.modalCloseBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Close modal">
+                <DDIcon name="x" size={18} color={DD_COLORS.textMuted} weight="bold" />
               </Pressable>
             </View>
 
             {submitSuccess ? (
               /* Success State */
               <View style={styles.successStateBox}>
-                <Text style={styles.successIcon}>🎉</Text>
-                <Text style={styles.successTitle}>Completion Submitted!</Text>
-                <Text style={styles.successMsg}>
-                  Your submission for {submitSuccess.completion_date} is now pending peer review.
-                </Text>
-
-                <View style={styles.successProofBox}>
-                  <Text style={styles.successProofNotice}>
-                    📸 Proof photos and videos are not uploaded to Supabase. Please send your proof directly to your assigned verifier via WhatsApp!
-                  </Text>
+                <View style={styles.successIconCircle}>
+                  <DDIcon name="check-circle" size={44} color={DD_COLORS.lime} weight="fill" />
                 </View>
+                <DDText variant="h2" color="primary" align="center">
+                  Completion Submitted!
+                </DDText>
+                <DDText variant="bodySm" color="secondary" align="center" style={styles.successMsg}>
+                  Your submission for {submitSuccess.completion_date} is now pending peer review.
+                </DDText>
 
-                <Pressable
-                  onPress={() => handleSendWhatsAppProof(submitSuccess)}
-                  style={styles.whatsAppShareBtn}>
-                  <Text style={styles.whatsAppShareBtnText}>📲 Share Proof on WhatsApp</Text>
-                </Pressable>
+                {submitSuccess.numeric_value !== null && submitSuccess.numeric_value !== undefined ? (
+                  <View style={styles.successProofDetailsBox}>
+                    <View style={styles.proofCodeRow}>
+                      <DDText variant="caption" color="muted" bold>
+                        RECORDED METRIC
+                      </DDText>
+                      <View style={styles.proofCodeBadge}>
+                        <DDText variant="title" color="lime" bold style={styles.proofCodeText}>
+                          {submitSuccess.numeric_value} {challenge.proofConfig?.unit || ''}
+                        </DDText>
+                      </View>
+                    </View>
+                  </View>
+                ) : null}
 
-                <Pressable
-                  onPress={() => setSubmitModalVisible(false)}
-                  style={styles.modalDoneBtn}>
-                  <Text style={styles.modalDoneBtnText}>Done</Text>
-                </Pressable>
+                {submitSuccess.text_entry ? (
+                  <View style={styles.successProofDetailsBox}>
+                    <DDText variant="caption" color="muted" bold>
+                      SUBMITTED LOG
+                    </DDText>
+                    <DDText variant="bodySm" color="primary" style={{ marginTop: 4 }}>
+                      &quot;{submitSuccess.text_entry}&quot;
+                    </DDText>
+                  </View>
+                ) : null}
+
+                {submitSuccess.proof_code ? (
+                  <View style={styles.successProofDetailsBox}>
+                    <View style={styles.proofCodeRow}>
+                      <DDText variant="caption" color="muted" bold>
+                        YOUR PROOF CODE
+                      </DDText>
+                      <View style={styles.proofCodeBadge}>
+                        <DDText variant="title" color="lime" bold style={styles.proofCodeText}>
+                          {submitSuccess.proof_code}
+                        </DDText>
+                      </View>
+                    </View>
+                    {submitSuccess.action_prompt && submitSuccess.action_prompt_id !== 'write_code_on_paper' ? (
+                      <View style={styles.proofActionRow}>
+                        <DDText variant="caption" color="muted" bold>
+                          ACTION
+                        </DDText>
+                        <DDText
+                          variant="bodySm"
+                          color="primary"
+                          bold
+                          numberOfLines={2}
+                          style={{ flex: 1, textAlign: 'right', marginLeft: 8 }}>
+                          {submitSuccess.action_prompt}
+                        </DDText>
+                      </View>
+                    ) : null}
+                  </View>
+                ) : null}
+
+                {isProofCodeRequired ? (
+                  <>
+                    <View style={styles.successProofBox}>
+                      <DDIcon name="info" size={16} color={DD_COLORS.info} weight="bold" />
+                      <DDText variant="caption" color="secondary" style={styles.successProofNotice}>
+                        Proof photos and videos are not uploaded to our servers. Send your proof directly to your assigned verifier via WhatsApp!
+                      </DDText>
+                    </View>
+
+                    <DDButton
+                      title="Share Proof on WhatsApp"
+                      variant="primary"
+                      iconLeft="share"
+                      onPress={() => handleSendWhatsAppProof(submitSuccess)}
+                      fullWidth
+                      style={styles.modalSuccessBtn}
+                    />
+                  </>
+                ) : (
+                  <View style={styles.successProofBox}>
+                    <DDIcon name="check-circle" size={16} color={DD_COLORS.lime} weight="bold" />
+                    <DDText variant="caption" color="secondary" style={styles.successProofNotice}>
+                      Your submission has been sent to your assigned verifier for review. Once verified, your progress and streak will update!
+                    </DDText>
+                  </View>
+                )}
+
+                <DDButton
+                  title="Done"
+                  variant="secondary"
+                  onPress={closeSubmitModal}
+                  fullWidth
+                  style={{ marginTop: isProofCodeRequired ? 0 : 8 }}
+                />
               </View>
             ) : (
               /* Form State */
-              <ScrollView showsVerticalScrollIndicator={false}>
+              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.formScroll}>
+                {isModalResubmission && (
+                  <View style={styles.modalResubmitCard}>
+                    <View style={styles.modalResubmitHeader}>
+                      <DDIcon name="warning" size={16} color={DD_COLORS.coral} weight="bold" />
+                      <DDText variant="label" color="coral" bold style={{ marginLeft: 6 }}>
+                        {isDaily ? `Resubmitting for ${selectedDate}` : 'Resubmitting Dare'}
+                      </DDText>
+                    </View>
+                    {targetCompletionForDate?.rejection_reason ? (
+                      <View style={styles.modalPrevFeedbackBox}>
+                        <DDText variant="caption" color="muted" bold>
+                          PREVIOUS VERIFIER FEEDBACK
+                        </DDText>
+                        <DDText variant="bodySm" color="primary" style={{ marginTop: 2 }}>
+                          &quot;{targetCompletionForDate.rejection_reason}&quot;
+                        </DDText>
+                      </View>
+                    ) : null}
+                    <View style={styles.modalGraceRow}>
+                      <DDIcon
+                        name="clock"
+                        size={12}
+                        color={modalGraceStatus.isExpired ? DD_COLORS.danger : DD_COLORS.warning}
+                        weight="bold"
+                      />
+                      <DDText
+                        variant="caption"
+                        color={modalGraceStatus.isExpired ? 'danger' : 'secondary'}
+                        style={{ marginLeft: 4 }}>
+                        {modalGraceStatus.isUnverifiable
+                          ? 'The rejection timestamp cannot be verified. Resubmission is unavailable.'
+                          : modalGraceStatus.isExpired
+                            ? `Resubmission window expired on ${modalGraceStatus.formattedDeadline}`
+                            : `48h grace window: ${modalGraceStatus.label} (until ${modalGraceStatus.formattedDeadline})`}
+                      </DDText>
+                    </View>
+                  </View>
+                )}
+
                 {/* Date Selection (Daily challenge) */}
                 {isDaily ? (
                   <View style={styles.formGroup}>
-                    <Text style={styles.formLabel}>Completion Date</Text>
+                    <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                      Completion Date
+                    </DDText>
                     <View style={styles.dateSelectorRow}>
                       <Pressable
-                        onPress={() => setSelectedDate(todayDate)}
+                        onPress={() => handleSelectDate(todayDate)}
                         style={[
                           styles.dateOption,
                           selectedDate === todayDate && styles.dateOptionActive,
                         ]}>
-                        <Text
-                          style={[
-                            styles.dateOptionText,
-                            selectedDate === todayDate && styles.dateOptionTextActive,
-                          ]}>
-                          📅 Today ({todayDate})
-                        </Text>
+                        <DDIcon
+                          name="calendar"
+                          size={14}
+                          color={selectedDate === todayDate ? DD_COLORS.lime : DD_COLORS.textMuted}
+                          weight="bold"
+                        />
+                        <DDText
+                          variant="caption"
+                          bold
+                          color={selectedDate === todayDate ? 'lime' : 'secondary'}>
+                          Today ({todayDate})
+                        </DDText>
                       </Pressable>
 
                       <Pressable
-                        onPress={() => setSelectedDate(yesterdayDate)}
+                        onPress={() => handleSelectDate(yesterdayDate)}
                         style={[
                           styles.dateOption,
                           selectedDate === yesterdayDate && styles.dateOptionActive,
                         ]}>
-                        <Text
-                          style={[
-                            styles.dateOptionText,
-                            selectedDate === yesterdayDate && styles.dateOptionTextActive,
-                          ]}>
-                          ⏮️ Yesterday ({yesterdayDate})
-                        </Text>
+                        <DDIcon
+                          name="clock"
+                          size={14}
+                          color={selectedDate === yesterdayDate ? DD_COLORS.lime : DD_COLORS.textMuted}
+                          weight="bold"
+                        />
+                        <DDText
+                          variant="caption"
+                          bold
+                          color={selectedDate === yesterdayDate ? 'lime' : 'secondary'}>
+                          Yesterday ({yesterdayDate})
+                        </DDText>
                       </Pressable>
+
+                      {selectedDate !== todayDate && selectedDate !== yesterdayDate && (
+                        <View style={[styles.dateOption, styles.dateOptionActive]}>
+                          <DDIcon name="refresh" size={14} color={DD_COLORS.lime} weight="bold" />
+                          <DDText variant="caption" bold color="lime">
+                            {selectedDate} (Resubmission)
+                          </DDText>
+                        </View>
+                      )}
                     </View>
-                    <Text style={styles.formHint}>
-                      Challenges allow submissions for today and yesterday in the challenge timezone ({challenge.timezone || 'UTC'}).
-                    </Text>
+
+                    {dateChangeNotice ? (
+                      <View style={styles.dateChangeNoticeBox}>
+                        <DDIcon name="info" size={14} color={DD_COLORS.warning} weight="bold" />
+                        <DDText variant="caption" color="warning" bold style={{ marginLeft: 6, flex: 1 }}>
+                          {dateChangeNotice}
+                        </DDText>
+                      </View>
+                    ) : null}
+
+                    <DDText variant="caption" color="muted" style={styles.formHint}>
+                      {isModalResubmission
+                        ? modalGraceStatus.isUnverifiable
+                          ? `Resubmission for ${selectedDate} is unavailable because the rejection timestamp cannot be verified.`
+                          : `Resubmitting for ${selectedDate}. 48-hour grace period active.`
+                        : `Submissions accepted for today and yesterday in challenge timezone (${challenge.timezone || 'UTC'}).`}
+                    </DDText>
                   </View>
                 ) : (
                   <View style={styles.formGroup}>
-                    <Text style={styles.formLabel}>Dare Date</Text>
-                    <Text style={styles.staticDateText}>📅 Today: {todayDate}</Text>
+                    <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                      Dare Date
+                    </DDText>
+                    <View style={styles.staticDateBox}>
+                      <DDIcon name="calendar" size={14} color={DD_COLORS.lime} weight="bold" />
+                      <DDText variant="caption" color="lime" bold>
+                        {selectedDate === todayDate ? `Today: ${todayDate}` : `Dare Date: ${selectedDate}`}
+                      </DDText>
+                    </View>
                   </View>
                 )}
 
                 {/* Verifier Selection */}
                 <View style={styles.formGroup}>
-                  <Text style={styles.formLabel}>Assign Peer Verifier</Text>
+                  <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                    Assign Peer Verifier
+                  </DDText>
                   {eligibleVerifiers.length === 0 ? (
                     <View style={styles.noVerifiersBox}>
-                      <Text style={styles.noVerifiersText}>
-                        ⚠️ No eligible verifiers found. Peer verification requires at least one other participant or referee.
-                      </Text>
-                      <Pressable
+                      <DDIcon name="warning" size={18} color={DD_COLORS.warning} weight="bold" />
+                      <DDText variant="caption" color="secondary" style={styles.noVerifiersText}>
+                        No eligible verifiers found. Peer verification requires at least one other participant or referee.
+                      </DDText>
+                      <DDButton
+                        title="Invite a friend"
+                        variant="secondary"
+                        size="sm"
+                        iconLeft="user-plus"
                         onPress={() => {
-                          setSubmitModalVisible(false);
+                          closeSubmitModal();
                           handleShare();
                         }}
-                        style={styles.inviteFriendsAction}>
-                        <Text style={styles.inviteFriendsActionText}>
-                          📤 Invite a friend to this challenge
-                        </Text>
-                      </Pressable>
+                      />
                     </View>
                   ) : (
                     <View style={styles.verifiersList}>
                       {eligibleVerifiers.map((v) => (
                         <Pressable
                           key={v.user_id}
-                          onPress={() => setSelectedVerifierId(v.user_id)}
+                          onPress={() => handleSelectVerifier(v.user_id)}
                           style={[
                             styles.verifierOption,
                             selectedVerifierId === v.user_id && styles.verifierOptionActive,
                           ]}>
-                          <View style={styles.verifierOptionLeft}>
-                            <Text style={styles.verifierOptionAvatar}>
-                              {v.is_creator ? '👑' : '👤'}
-                            </Text>
-                            <View>
-                              <Text
-                                style={[
-                                  styles.verifierOptionName,
-                                  selectedVerifierId === v.user_id && styles.verifierOptionNameActive,
-                                ]}>
-                                {v.display_name}
-                              </Text>
-                              <Text style={styles.verifierOptionRole}>
-                                {v.is_creator ? 'Challenge Referee / Creator' : 'Fellow Participant'}
-                              </Text>
-                            </View>
+                          <DDAvatar name={v.display_name} size="sm" />
+                          <View style={styles.verifierOptionMeta}>
+                            <DDText
+                              variant="label"
+                              bold
+                              color={selectedVerifierId === v.user_id ? 'lime' : 'primary'}>
+                              {v.display_name}
+                            </DDText>
+                            <DDText variant="caption" color="muted">
+                              {v.is_creator ? 'Challenge Creator / Referee' : 'Fellow Participant'}
+                            </DDText>
                           </View>
 
                           <View
@@ -1301,13 +2106,223 @@ export default function ChallengeDetailScreen() {
                   )}
                 </View>
 
+                {/* Proof Input Section based on proofMethod */}
+                {proofMethod === 'numeric_entry' && (
+                  <View style={styles.formGroup}>
+                    <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                      Recorded Value {challenge.proofConfig?.unit ? `(${challenge.proofConfig.unit})` : ''}
+                    </DDText>
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder={
+                        challenge.proofConfig?.unit
+                          ? `e.g. 50 ${challenge.proofConfig.unit}`
+                          : 'e.g. 25'
+                      }
+                      placeholderTextColor={DD_COLORS.textMuted}
+                      value={numericValue}
+                      onChangeText={setNumericValue}
+                      keyboardType="numeric"
+                    />
+                    {(challenge.proofConfig?.min_value !== undefined ||
+                      challenge.proofConfig?.max_value !== undefined) && (
+                      <DDText variant="caption" color="muted" style={styles.formHint}>
+                        Allowed range:{' '}
+                        {challenge.proofConfig.min_value !== undefined
+                          ? `min ${challenge.proofConfig.min_value}`
+                          : ''}
+                        {challenge.proofConfig.min_value !== undefined &&
+                        challenge.proofConfig.max_value !== undefined
+                          ? ', '
+                          : ''}
+                        {challenge.proofConfig.max_value !== undefined
+                          ? `max ${challenge.proofConfig.max_value}`
+                          : ''}
+                        {challenge.proofConfig.unit ? ` ${challenge.proofConfig.unit}` : ''}
+                      </DDText>
+                    )}
+                  </View>
+                )}
+
+                {proofMethod === 'text_log' && (
+                  <View style={styles.formGroup}>
+                    <View style={styles.sectionHeaderRow}>
+                      <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                        Written Completion Log
+                      </DDText>
+                      <DDText
+                        variant="caption"
+                        color={
+                          textEntry.trim().length >= 5 && textEntry.trim().length <= 500
+                            ? 'muted'
+                            : 'warning'
+                        }>
+                        {textEntry.trim().length}/500 chars (min 5)
+                      </DDText>
+                    </View>
+                    <TextInput
+                      style={[styles.textInput, { minHeight: 90, textAlignVertical: 'top' }]}
+                      placeholder="Describe what you completed, lessons learned, or details..."
+                      placeholderTextColor={DD_COLORS.textMuted}
+                      value={textEntry}
+                      onChangeText={setTextEntry}
+                      multiline
+                      numberOfLines={4}
+                      maxLength={500}
+                    />
+                    <DDText variant="caption" color="muted" style={styles.formHint}>
+                      Write a brief log of your accomplishment (5–500 characters) for your verifier to read.
+                    </DDText>
+                  </View>
+                )}
+
+                {proofMethod === 'peer_confirmation' && (
+                  <View style={styles.formGroup}>
+                    <View style={styles.peerConfirmationCard}>
+                      <DDIcon name="verify" size={20} color={DD_COLORS.lime} weight="fill" />
+                      <View style={{ flex: 1, marginLeft: 10 }}>
+                        <DDText variant="label" color="primary" bold>
+                          Peer Honor Verification
+                        </DDText>
+                        <DDText variant="caption" color="secondary" style={{ marginTop: 2 }}>
+                          No photo, video, or code required. Your assigned verifier will vouch for your completion based on direct observation or peer trust.
+                        </DDText>
+                      </View>
+                    </View>
+                  </View>
+                )}
+
+                {isProofCodeRequired && (
+                  <View style={styles.formGroup}>
+                    <View style={styles.sectionHeaderRow}>
+                      <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                        {proofMethod === 'photo_code' ? 'Photo Proof Code' : 'Dynamic Proof Challenge'}
+                      </DDText>
+                      {effectiveProofChallenge && !isProofExpired ? (
+                        <Pressable
+                          onPress={handleGenerateProof}
+                          disabled={isGeneratingProof || isSubmitting}
+                          hitSlop={8}>
+                          <DDText variant="caption" color="lime" bold>
+                            {isGeneratingProof ? 'Regenerating...' : 'Get New Code'}
+                          </DDText>
+                        </Pressable>
+                      ) : null}
+                    </View>
+
+                    {!effectiveProofChallenge ? (
+                      <View style={styles.generateProofPromptBox}>
+                        <View style={styles.generateProofHeaderRow}>
+                          <DDIcon name="shield-check" size={18} color={DD_COLORS.lime} weight="bold" />
+                          <DDText variant="bodySm" color="primary" bold style={{ flex: 1, marginLeft: 8 }}>
+                            {proofMethod === 'photo_code'
+                              ? 'Step 1: Generate Proof Code'
+                              : 'Step 1: Generate Proof Code & Gesture'}
+                          </DDText>
+                        </View>
+                        <DDText variant="caption" color="secondary" style={styles.generateProofDesc}>
+                          {proofMethod === 'photo_code'
+                            ? 'To prevent recycled photos, DareDrop generates a fresh 4-character code. Write this code on paper before taking your photo.'
+                            : 'To prevent recycled photos, DareDrop requires a unique 4-character code and gesture. Generate your code now before capturing proof.'}
+                        </DDText>
+
+                        {proofError ? (
+                          <View style={styles.proofErrorBox}>
+                            <DDIcon name="warning" size={14} color={DD_COLORS.danger} weight="bold" />
+                            <DDText variant="caption" color="danger" style={{ flex: 1, marginLeft: 6 }}>
+                              {proofError}
+                            </DDText>
+                          </View>
+                        ) : null}
+
+                        <DDButton
+                          title={isGeneratingProof ? 'Generating Code...' : 'Generate Proof Challenge'}
+                          variant="primary"
+                          iconLeft="sparkle"
+                          loading={isGeneratingProof}
+                          disabled={isGeneratingProof || !selectedVerifierId || eligibleVerifiers.length === 0}
+                          onPress={handleGenerateProof}
+                          fullWidth
+                          style={styles.generateProofBtn}
+                        />
+                      </View>
+                    ) : (
+                      <View style={[styles.proofCard, isProofExpired && styles.proofCardExpired]}>
+                        {isProofExpired ? (
+                          <View style={styles.proofExpiredBanner}>
+                            <DDIcon name="warning" size={16} color={DD_COLORS.danger} weight="bold" />
+                            <DDText variant="caption" color="danger" bold style={{ flex: 1, marginLeft: 6 }}>
+                              Proof challenge expired (45m TTL). Please generate a new code.
+                            </DDText>
+                          </View>
+                        ) : (
+                          <View style={styles.proofHeaderRow}>
+                            <View style={styles.proofCodeTag}>
+                              <DDText variant="caption" color="muted" bold>
+                                PROOF CODE
+                              </DDText>
+                              <DDText variant="h1" color="lime" bold style={styles.proofCodeMonospace}>
+                                {effectiveProofChallenge.proof_code}
+                              </DDText>
+                            </View>
+                            <View style={styles.proofTtlBadge}>
+                              <DDIcon name="clock" size={12} color={DD_COLORS.lime} weight="bold" />
+                              <DDText variant="caption" color="lime" bold style={{ marginLeft: 4 }}>
+                                Valid 45m
+                              </DDText>
+                            </View>
+                          </View>
+                        )}
+
+                        {proofMethod === 'physical_action' && (
+                          <View style={styles.proofActionBox}>
+                            <DDText variant="caption" color="muted" bold style={styles.proofActionLabel}>
+                              REQUIRED PHYSICAL ACTION / GESTURE
+                            </DDText>
+                            <DDText variant="body" color="primary" bold style={styles.proofActionPrompt}>
+                              {effectiveProofChallenge.action_prompt}
+                            </DDText>
+                          </View>
+                        )}
+
+                        <DDText variant="caption" color="secondary" style={styles.proofInstructionText}>
+                          {proofMethod === 'photo_code'
+                            ? '✍️ Write code '
+                            : '✍️ Include code '}
+                          <DDText variant="caption" color="lime" bold>
+                            {effectiveProofChallenge.proof_code}
+                          </DDText>
+                          {proofMethod === 'photo_code'
+                            ? ' on paper or note and include it in your photo for your verifier.'
+                            : ' on paper/screen and demonstrate the gesture in your evidence for your verifier.'}
+                        </DDText>
+
+                        {isProofExpired ? (
+                          <DDButton
+                            title="Generate Fresh Code"
+                            variant="primary"
+                            iconLeft="refresh"
+                            loading={isGeneratingProof}
+                            disabled={isGeneratingProof}
+                            onPress={handleGenerateProof}
+                            fullWidth
+                            style={{ marginTop: 8 }}
+                          />
+                        ) : null}
+                      </View>
+                    )}
+                  </View>
+                )}
+
                 {/* Optional Submission Note */}
                 <View style={styles.formGroup}>
-                  <Text style={styles.formLabel}>Submission Note (Optional)</Text>
+                  <DDText variant="label" color="primary" bold style={styles.formLabel}>
+                    Submission Note (Optional)
+                  </DDText>
                   <TextInput
                     style={styles.textInput}
-                    placeholder="e.g. 50 pushups completed, 3 sets. Felt great!"
-                    placeholderTextColor={DD.textMuted}
+                    placeholder="e.g. 50 pushups completed, felt great!"
+                    placeholderTextColor={DD_COLORS.textMuted}
                     value={submissionNote}
                     onChangeText={setSubmissionNote}
                     multiline
@@ -1316,39 +2331,69 @@ export default function ChallengeDetailScreen() {
                   />
                 </View>
 
-                {/* WhatsApp Info Notice */}
+                {/* Info Notice Box */}
                 <View style={styles.infoNoticeBox}>
-                  <Text style={styles.infoNoticeTitle}>💬 How Peer Verification Works:</Text>
-                  <Text style={styles.infoNoticeBody}>
-                    {"1. Tap Submit below to log your completion on DareDrop.\n2. Next, tap 'Share Proof on WhatsApp' to send your photo/video directly to your verifier.\n3. Once your verifier approves it, your streak and progress will update!"}
-                  </Text>
+                  <DDIcon name="info" size={16} color={DD_COLORS.info} weight="bold" />
+                  <DDText variant="caption" color="secondary" style={styles.infoNoticeBody}>
+                    {isProofCodeRequired ? (
+                      <>
+                        1. Tap Submit below to log your dare completion.{"\n"}
+                        2. Next, tap &lsquo;Share Proof on WhatsApp&rsquo; to send proof to your verifier.{"\n"}
+                        3. Once verified, your streak will instantly update!
+                      </>
+                    ) : (
+                      <>
+                        1. Tap Submit below to log your dare completion.{"\n"}
+                        2. Your assigned verifier will review and confirm your submission in DareDrop.{"\n"}
+                        3. Once verified, your streak will instantly update!
+                      </>
+                    )}
+                  </DDText>
                 </View>
 
                 {/* Error Banner */}
                 {submitError && (
                   <View style={styles.errorBox}>
-                    <Text style={styles.errorText}>⚠️ {submitError}</Text>
+                    <DDIcon name="warning" size={16} color={DD_COLORS.danger} weight="bold" />
+                    <DDText variant="caption" color="danger" style={styles.errorText}>
+                      {submitError}
+                    </DDText>
                   </View>
                 )}
 
-                {/* Action Button */}
-                <Pressable
+                {/* Submit Action */}
+                <DDButton
+                  title={
+                    isProofCodeRequired && !effectiveProofChallenge
+                      ? 'Generate Proof Code to Submit'
+                      : isModalResubmission
+                        ? modalGraceStatus.isExpired
+                          ? modalGraceStatus.isUnverifiable
+                            ? 'Timestamp Unverified'
+                            : 'Resubmission Window Expired'
+                          : 'Resubmit for Peer Verification'
+                        : 'Submit for Peer Verification'
+                  }
+                  variant="primary"
+                  loading={isSubmitting}
+                  disabled={
+                    isSubmitting ||
+                    isGeneratingProof ||
+                    !selectedVerifierId ||
+                    eligibleVerifiers.length === 0 ||
+                    (isModalResubmission && modalGraceStatus.isExpired) ||
+                    (isProofCodeRequired
+                      ? !effectiveProofChallenge || isProofExpired
+                      : proofMethod === 'text_log'
+                        ? textEntry.trim().length < 5 || textEntry.trim().length > 500
+                        : proofMethod === 'numeric_entry'
+                          ? !numericValue.trim() || !Number.isFinite(Number(numericValue.trim()))
+                          : false)
+                  }
                   onPress={handleSubmitCompletion}
-                  disabled={isSubmitting || !selectedVerifierId || eligibleVerifiers.length === 0}
-                  style={({ pressed }) => [
-                    styles.modalSubmitActionBtn,
-                    (isSubmitting || !selectedVerifierId || eligibleVerifiers.length === 0) &&
-                      styles.btnDisabled,
-                    pressed && !isSubmitting && { opacity: 0.88 },
-                  ]}>
-                  {isSubmitting ? (
-                    <ActivityIndicator color={DD.bg} size="small" />
-                  ) : (
-                    <Text style={styles.modalSubmitActionBtnText}>
-                      Submit for Peer Verification
-                    </Text>
-                  )}
-                </Pressable>
+                  fullWidth
+                  style={styles.modalSubmitActionBtn}
+                />
               </ScrollView>
             )}
           </View>
@@ -1364,20 +2409,23 @@ export default function ChallengeDetailScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeaderRow}>
-              <View>
-                <Text style={styles.modalTitle}>Reassign Verifier</Text>
-                <Text style={styles.modalSubtitle}>
+              <View style={styles.modalHeaderTexts}>
+                <DDText variant="h3" color="primary">
+                  Reassign Verifier
+                </DDText>
+                <DDText variant="caption" color="muted">
                   Choose a new peer to verify this submission
-                </Text>
+                </DDText>
               </View>
               <Pressable
                 onPress={() => setReassignModalVisible(false)}
+                hitSlop={8}
                 style={styles.modalCloseBtn}>
-                <Text style={styles.modalCloseBtnText}>✕</Text>
+                <DDIcon name="x" size={18} color={DD_COLORS.textMuted} weight="bold" />
               </Pressable>
             </View>
 
-            <View style={{ marginVertical: DD.s3 }}>
+            <View style={styles.modalListContainer}>
               {eligibleVerifiers
                 .filter((v) => v.user_id !== reassigningCompletion?.verifier_id)
                 .map((v) => (
@@ -1388,20 +2436,17 @@ export default function ChallengeDetailScreen() {
                       styles.verifierOption,
                       newVerifierId === v.user_id && styles.verifierOptionActive,
                     ]}>
-                    <Text style={styles.verifierOptionAvatar}>
-                      {v.is_creator ? '👑' : '👤'}
-                    </Text>
-                    <View style={{ flex: 1 }}>
-                      <Text
-                        style={[
-                          styles.verifierOptionName,
-                          newVerifierId === v.user_id && styles.verifierOptionNameActive,
-                        ]}>
+                    <DDAvatar name={v.display_name} size="sm" />
+                    <View style={styles.verifierOptionMeta}>
+                      <DDText
+                        variant="label"
+                        bold
+                        color={newVerifierId === v.user_id ? 'lime' : 'primary'}>
                         {v.display_name}
-                      </Text>
-                      <Text style={styles.verifierOptionRole}>
-                        {v.is_creator ? 'Referee' : 'Participant'}
-                      </Text>
+                      </DDText>
+                      <DDText variant="caption" color="muted">
+                        {v.is_creator ? 'Referee / Creator' : 'Participant'}
+                      </DDText>
                     </View>
                     <View
                       style={[
@@ -1416,36 +2461,44 @@ export default function ChallengeDetailScreen() {
               {eligibleVerifiers.filter(
                 (v) => v.user_id !== reassigningCompletion?.verifier_id,
               ).length === 0 && (
-                <Text style={styles.noVerifiersText}>
-                  No other eligible verifiers available. Invite more participants to the challenge to reassign.
-                </Text>
+                <DDText variant="bodySm" color="muted" align="center" style={styles.noVerifiersText}>
+                  No other eligible verifiers available. Invite more participants to reassign.
+                </DDText>
               )}
             </View>
 
             {reassignError && (
               <View style={styles.errorBox}>
-                <Text style={styles.errorText}>⚠️ {reassignError}</Text>
+                <DDIcon name="warning" size={16} color={DD_COLORS.danger} weight="bold" />
+                <DDText variant="caption" color="danger" style={styles.errorText}>
+                  {reassignError}
+                </DDText>
               </View>
             )}
 
-            <Pressable
-              onPress={handleReassignSubmit}
+            {/* Reassign Advisory Notice */}
+            <View style={styles.reassignNoticeBox}>
+              <DDIcon name="info" size={14} color={DD_COLORS.info} weight="bold" />
+              <DDText variant="caption" color="secondary" style={styles.reassignNoticeText}>
+                {isProofCodeRequired
+                  ? 'Reassigning updates who can verify on DareDrop, but does NOT transfer WhatsApp media. You must share your proof photo/video on WhatsApp directly with your newly assigned verifier.'
+                  : 'Reassigning updates who can verify your submission on DareDrop. Your new verifier will be able to review your submitted completion directly in the app.'}
+              </DDText>
+            </View>
+
+            <DDButton
+              title="Confirm Reassignment"
+              variant="primary"
+              loading={isReassigning}
               disabled={isReassigning || !newVerifierId}
-              style={[
-                styles.modalSubmitActionBtn,
-                (!newVerifierId || isReassigning) && styles.btnDisabled,
-              ]}>
-              {isReassigning ? (
-                <ActivityIndicator color={DD.bg} size="small" />
-              ) : (
-                <Text style={styles.modalSubmitActionBtnText}>Confirm Reassignment</Text>
-              )}
-            </Pressable>
+              onPress={handleReassignSubmit}
+              fullWidth
+            />
           </View>
         </View>
       </Modal>
 
-      {/* Inline Reject Modal */}
+      {/* INLINE REJECT MODAL */}
       <Modal
         visible={inlineRejectModalVisible}
         transparent
@@ -1454,25 +2507,28 @@ export default function ChallengeDetailScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeaderRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>Reject Submission</Text>
-                <Text style={styles.modalSubtitle}>
-                  Provide feedback to the participant so they can submit valid proof.
-                </Text>
+              <View style={styles.modalHeaderTexts}>
+                <DDText variant="h3" color="primary">
+                  Reject Submission
+                </DDText>
+                <DDText variant="caption" color="muted">
+                  Provide feedback so the challenger can resubmit valid proof.
+                </DDText>
               </View>
               <Pressable
                 onPress={() => setInlineRejectModalVisible(false)}
                 disabled={isReviewing}
+                hitSlop={8}
                 style={styles.modalCloseBtn}>
-                <Text style={styles.modalCloseBtnText}>✕</Text>
+                <DDIcon name="x" size={18} color={DD_COLORS.textMuted} weight="bold" />
               </Pressable>
             </View>
 
-            <View style={{ marginVertical: DD.s4 }}>
+            <View style={styles.modalInputBox}>
               <TextInput
                 style={styles.textInput}
-                placeholder="e.g., Proof photo was missing or incomplete"
-                placeholderTextColor={DD.textMuted}
+                placeholder="e.g. Proof photo was missing or incomplete"
+                placeholderTextColor={DD_COLORS.textMuted}
                 value={inlineRejectionReason}
                 onChangeText={setInlineRejectionReason}
                 maxLength={MAX_REJECTION_REASON_LENGTH}
@@ -1482,155 +2538,115 @@ export default function ChallengeDetailScreen() {
               />
             </View>
 
-            <Pressable
-              onPress={handleConfirmInlineReject}
+            <DDButton
+              title="Confirm Reject"
+              variant="destructive"
+              loading={isReviewing}
               disabled={isReviewing}
-              style={[styles.modalConfirmRejectBtn, isReviewing && { opacity: 0.5 }]}>
-              {isReviewing ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={styles.modalConfirmRejectText}>Confirm Reject</Text>
-              )}
-            </Pressable>
+              onPress={handleConfirmInlineReject}
+              fullWidth
+            />
           </View>
         </View>
       </Modal>
 
-      {/* Invite Friends Modal */}
+      {/* INVITE FRIENDS MODAL */}
       <Modal
         visible={inviteModalVisible}
         transparent
         animationType="slide"
         onRequestClose={() => setInviteModalVisible(false)}>
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { maxHeight: '80%' }]}>
+          <View style={[styles.modalContent, { maxHeight: '82%' }]}>
             <View style={styles.modalHeaderRow}>
-              <View>
-                <Text style={styles.modalTitle}>Invite Friends</Text>
-                <Text style={styles.modalSubtitle}>
-                  Select friends to challenge them to &ldquo;{challenge?.title}&rdquo;
-                </Text>
+              <View style={styles.modalHeaderTexts}>
+                <DDText variant="h3" color="primary">
+                  Invite Friends
+                </DDText>
+                <DDText variant="caption" color="muted" numberOfLines={1}>
+                  Challenge your friends to &ldquo;{challenge.title}&rdquo;
+                </DDText>
               </View>
               <Pressable
                 onPress={() => setInviteModalVisible(false)}
                 hitSlop={8}
                 style={styles.modalCloseBtn}>
-                <Text style={styles.modalCloseBtnText}>✕</Text>
+                <DDIcon name="x" size={18} color={DD_COLORS.textMuted} weight="bold" />
               </Pressable>
             </View>
 
             {inviteFriendError && (
-              <View style={[styles.errorBox, { marginVertical: DD.s2 }]}>
-                <Text style={styles.errorText}>⚠️ {inviteFriendError}</Text>
+              <View style={styles.errorBox}>
+                <DDIcon name="warning" size={16} color={DD_COLORS.danger} weight="bold" />
+                <DDText variant="caption" color="danger" style={styles.errorText}>
+                  {inviteFriendError}
+                </DDText>
               </View>
             )}
 
             {loadingFriends ? (
-              <View style={{ paddingVertical: DD.s8, alignItems: 'center' }}>
-                <ActivityIndicator color={DD.lime} size="large" />
-                <Text style={{ color: DD.textMuted, marginTop: DD.s2, fontSize: 13 }}>
-                  Loading your friends...
-                </Text>
+              <View style={styles.friendsLoadingBox}>
+                <ActivityIndicator color={DD_COLORS.lime} size="large" />
+                <DDText variant="caption" color="secondary" style={{ marginTop: DD_SPACING.sm }}>
+                  Loading friends…
+                </DDText>
               </View>
             ) : myFriends.length === 0 ? (
-              <View style={{ paddingVertical: DD.s6, alignItems: 'center' }}>
-                <Text style={{ fontSize: 32, marginBottom: DD.s2 }}>🤝</Text>
-                <Text style={{ fontSize: 16, fontWeight: '800', color: DD.text, marginBottom: DD.s1 }}>
+              <View style={styles.friendsEmptyBox}>
+                <View style={styles.friendsEmptyIconCircle}>
+                  <DDIcon name="friends" size={32} color={DD_COLORS.textMuted} weight="bold" />
+                </View>
+                <DDText variant="h3" color="primary" align="center">
                   No friends added yet
-                </Text>
-                <Text style={{ fontSize: 13, color: DD.textSub, textAlign: 'center', marginBottom: DD.s4 }}>
+                </DDText>
+                <DDText variant="bodySm" color="secondary" align="center" style={styles.friendsEmptyDesc}>
                   Connect with friends using Friend Codes to invite them directly to dares!
-                </Text>
-                <Pressable
+                </DDText>
+                <DDButton
+                  title="Go to Friends & Social"
+                  variant="primary"
+                  iconRight="arrow-right"
                   onPress={() => {
                     setInviteModalVisible(false);
                     router.push('/friends');
                   }}
-                  style={{
-                    backgroundColor: DD.lime,
-                    paddingHorizontal: DD.s4,
-                    paddingVertical: DD.s2,
-                    borderRadius: DD.radiusPill,
-                  }}>
-                  <Text style={{ color: DD.bg, fontWeight: '800', fontSize: 13 }}>Go to Friends & Social →</Text>
-                </Pressable>
+                />
               </View>
             ) : (
-              <ScrollView style={{ marginTop: DD.s3 }} showsVerticalScrollIndicator={false}>
+              <ScrollView style={styles.friendsListScroll} showsVerticalScrollIndicator={false}>
                 {myFriends.map((f) => {
                   const isInvited = invitedFriendIds.has(f.friend_user_id);
                   const isAlreadyParticipant = eligibleVerifiers.some((v) => v.user_id === f.friend_user_id);
                   const isInviting = invitingFriendId === f.friend_user_id;
 
                   return (
-                    <View
-                      key={f.friendship_id}
-                      style={{
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        backgroundColor: DD.bgElement,
-                        padding: DD.s3,
-                        borderRadius: DD.radiusMd,
-                        marginBottom: DD.s2,
-                        borderWidth: 1,
-                        borderColor: DD.border,
-                      }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: DD.s3, flex: 1 }}>
-                        <Text style={{ fontSize: 24 }}>{f.avatar_emoji || '🦁'}</Text>
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ fontSize: 14, fontWeight: '800', color: DD.text }} numberOfLines={1}>
+                    <View key={f.friendship_id} style={styles.friendRow}>
+                      <View style={styles.friendRowLeft}>
+                        <DDAvatar name={f.display_name} size="sm" />
+                        <View style={styles.friendMeta}>
+                          <DDText variant="label" color="primary" bold numberOfLines={1}>
                             {f.display_name}
-                          </Text>
-                          <Text style={{ fontSize: 11, color: DD.textMuted }}>{f.friend_code}</Text>
+                          </DDText>
+                          <DDText variant="caption" color="muted">
+                            {f.friend_code}
+                          </DDText>
                         </View>
                       </View>
 
                       {isInvited ? (
-                        <View
-                          style={{
-                            paddingHorizontal: DD.s3,
-                            paddingVertical: DD.s1,
-                            borderRadius: DD.radiusPill,
-                            backgroundColor: DD.lime + '22',
-                            borderWidth: 1,
-                            borderColor: DD.lime,
-                          }}>
-                          <Text style={{ color: DD.lime, fontSize: 11, fontWeight: '800' }}>Invited ✓</Text>
-                        </View>
+                        <DDBadge label="Invited" variant="lime" size="sm" icon="check" />
                       ) : isAlreadyParticipant ? (
-                        <View
-                          style={{
-                            paddingHorizontal: DD.s3,
-                            paddingVertical: DD.s1,
-                            borderRadius: DD.radiusPill,
-                            backgroundColor: DD.bgCard,
-                            borderWidth: 1,
-                            borderColor: DD.border,
-                          }}>
-                          <Text style={{ color: DD.textMuted, fontSize: 11, fontWeight: '700' }}>Joined ✓</Text>
-                        </View>
+                        <DDBadge label="Joined" variant="neutral" size="sm" icon="check" />
                       ) : (
-                        <Pressable
-                          onPress={() => handleInviteFriend(f)}
+                        <DDButton
+                          title="Invite"
+                          variant="violet"
+                          size="sm"
+                          iconLeft="plus"
+                          loading={isInviting}
                           disabled={isInviting}
-                          style={({ pressed }) => [
-                            {
-                              backgroundColor: DD.purple,
-                              paddingHorizontal: DD.s3,
-                              paddingVertical: DD.s2,
-                              borderRadius: DD.radiusPill,
-                              minWidth: 70,
-                              alignItems: 'center',
-                            },
-                            pressed && { opacity: 0.8 },
-                          ]}>
-                          {isInviting ? (
-                            <ActivityIndicator size="small" color="#fff" />
-                          ) : (
-                            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '800' }}>Invite ⚡</Text>
-                          )}
-                        </Pressable>
+                          onPress={() => handleInviteFriend(f)}
+                        />
                       )}
                     </View>
                   );
@@ -1644,1197 +2660,989 @@ export default function ChallengeDetailScreen() {
   );
 }
 
-function DetailStat({
-  icon,
-  value,
-  label,
-  color,
-}: {
-  icon: string;
-  value: string;
-  label: string;
-  color: string;
-}) {
-  return (
-    <View style={detailStatStyles.box}>
-      <Text style={detailStatStyles.icon}>{icon}</Text>
-      <Text style={[detailStatStyles.value, { color }]}>{value}</Text>
-      <Text style={detailStatStyles.label}>{label}</Text>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: DD.bg,
+    backgroundColor: DD_COLORS.bg,
   },
   centerContainer: {
     justifyContent: 'center',
     alignItems: 'center',
-    gap: DD.s3,
+    gap: DD_SPACING.sm,
   },
   loadingText: {
-    color: DD.textSub,
-    fontSize: 15,
-    fontWeight: '600',
+    marginTop: DD_SPACING.xs,
   },
   notFound: {
     justifyContent: 'center',
     alignItems: 'center',
-    gap: DD.s4,
-    paddingHorizontal: DD.s5,
+    paddingHorizontal: DD_SPACING.xl,
+    gap: DD_SPACING.md,
   },
-  notFoundIcon: {
-    fontSize: 48,
-  },
-  notFoundText: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: DD.text,
+  notFoundIconCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: DD_COLORS.bgElement,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   notFoundSubtext: {
-    fontSize: 14,
-    color: DD.textSub,
-    textAlign: 'center',
     maxWidth: 280,
+    lineHeight: 18,
   },
-  toastContainer: {
-    position: 'absolute',
-    alignSelf: 'center',
-    zIndex: 999,
-    backgroundColor: DD.bgCard,
-    borderWidth: 1.5,
-    borderColor: DD.lime,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s4,
-    borderRadius: DD.radiusPill,
-    shadowColor: DD.lime,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 10,
-    elevation: 8,
-  },
-  toastText: {
-    color: DD.lime,
-    fontSize: 13,
-    fontWeight: '800',
+  backBtn: {
+    marginTop: DD_SPACING.sm,
   },
   navBar: {
-    paddingHorizontal: DD.s5,
-    paddingBottom: DD.s3,
+    paddingHorizontal: DD_SPACING.lg,
+    paddingBottom: DD_SPACING.sm,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: DD.bg,
+    backgroundColor: DD_COLORS.bg,
     borderBottomWidth: 1,
-    borderBottomColor: DD.border,
+    borderBottomColor: DD_COLORS.borderSubtle,
     zIndex: 10,
   },
   navRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s2,
+    gap: DD_SPACING.sm,
   },
-  backPill: {
-    backgroundColor: DD.bgCard,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
+  navIconButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: DD_COLORS.bgElement,
     borderWidth: 1,
-    borderColor: DD.border,
-  },
-  backPillText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: DD.text,
-  },
-  shareNavBtn: {
-    backgroundColor: DD.bgCard,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
-    borderWidth: 1,
-    borderColor: DD.border,
-  },
-  shareNavBtnText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: DD.text,
-  },
-  joinedPill: {
-    backgroundColor: DD.lime + '22',
-    borderWidth: 1,
-    borderColor: DD.lime,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
-  },
-  joinedPillText: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: DD.lime,
+    borderColor: DD_COLORS.borderSubtle,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   scroll: {
     flex: 1,
   },
   content: {
-    paddingTop: DD.s4,
-    paddingHorizontal: DD.s5,
+    paddingTop: DD_SPACING.md,
+    paddingHorizontal: DD_SPACING.lg,
   },
-  hero: {
-    paddingBottom: DD.s5,
-    borderBottomWidth: 2,
-    marginBottom: DD.s5,
+
+  /* Hero Section */
+  heroCard: {
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.card,
+    borderWidth: 1,
+    overflow: 'hidden',
+    marginBottom: DD_SPACING.lg,
   },
-  categoryTag: {
-    alignSelf: 'flex-start',
-    paddingVertical: DD.s1,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
-    marginBottom: DD.s3,
+  heroAccentBar: {
+    height: 4,
+    width: '100%',
   },
-  categoryTagText: {
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 0.5,
+  heroBody: {
+    padding: DD_SPACING.lg,
+    gap: DD_SPACING.sm,
   },
-  title: {
-    fontSize: 26,
-    fontWeight: '900',
-    color: DD.text,
-    letterSpacing: -0.5,
-    lineHeight: 32,
-    marginBottom: DD.s2,
+  heroBadgesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    flexWrap: 'wrap',
   },
-  creatorText: {
-    fontSize: 13,
-    color: DD.textSub,
-    fontWeight: '500',
+  categoryPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 3,
+    borderRadius: DD_RADII.pill,
   },
+  categoryPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  typePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 3,
+    borderRadius: DD_RADII.pill,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+  },
+  typePillText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  proofMethodPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 3,
+    borderRadius: DD_RADII.pill,
+    backgroundColor: 'rgba(0, 212, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 212, 255, 0.25)',
+  },
+  proofMethodPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  heroTitle: {
+    marginTop: 2,
+    lineHeight: 34,
+  },
+  creatorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
+    paddingTop: DD_SPACING.xs,
+  },
+  creatorMeta: {
+    justifyContent: 'center',
+  },
+
+  /* Stats Grid */
   statsGrid: {
     flexDirection: 'row',
-    gap: DD.s2,
-    marginBottom: DD.s6,
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.lg,
   },
-  section: {
-    marginBottom: DD.s6,
+  statBox: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: DD_SPACING.md,
+    paddingHorizontal: DD_SPACING.xs,
   },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: DD.text,
-    letterSpacing: -0.3,
+  statIconBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
   },
+  statValue: {
+    fontSize: 18,
+    lineHeight: 22,
+    fontWeight: '900',
+  },
+  statLabel: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+
+  /* Section Cards */
+  sectionCard: {
+    marginBottom: DD_SPACING.lg,
+  },
+  sectionHeading: {
+    marginBottom: DD_SPACING.sm,
+  },
+
+  /* Progress Section */
   progressHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: DD.s2,
+    alignItems: 'flex-start',
+    marginBottom: DD_SPACING.sm,
   },
-  progressPct: {
-    fontSize: 16,
+  progressHeaderLeft: {
+    flex: 1,
+    gap: 4,
+  },
+  streakBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(191, 253, 64, 0.12)',
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 2,
+    borderRadius: DD_RADII.pill,
+  },
+  streakText: {
+    fontSize: 10,
+    letterSpacing: 0.5,
+  },
+  progressPctText: {
+    fontSize: 22,
+    lineHeight: 26,
     fontWeight: '900',
   },
   progressTrack: {
-    height: 10,
-    backgroundColor: DD.bgCard,
-    borderRadius: 5,
+    height: 8,
+    backgroundColor: DD_COLORS.bgElement,
+    borderRadius: 4,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: DD.border,
+    borderColor: DD_COLORS.borderSubtle,
+    marginBottom: DD_SPACING.sm,
   },
   progressFill: {
     height: '100%',
-    borderRadius: 5,
+    borderRadius: 4,
   },
   progressSubrow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: DD.s2,
   },
-  progressLabel: {
-    fontSize: 12,
-    color: DD.textSub,
-    fontWeight: '600',
+  completedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 2,
+    borderRadius: DD_RADII.pill,
   },
-  streakBadge: {
-    marginTop: 2,
-    alignSelf: 'flex-start',
+  disclaimerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: DD_SPACING.sm,
+    paddingTop: DD_SPACING.xs,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.04)',
   },
-  streakText: {
-    fontSize: 12,
-    color: DD.lime,
-    fontWeight: '800',
+  disclaimerText: {
+    flex: 1,
+    lineHeight: 14,
   },
-  completedBadgeText: {
-    fontSize: 12,
-    color: DD.lime,
-    fontWeight: '800',
-  },
-  progressDisclaimer: {
-    fontSize: 11,
-    color: DD.textMuted,
-    fontStyle: 'italic',
-    marginTop: 4,
-  },
+
+  /* Peer Verification & Submission */
   submissionSectionCard: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusCard,
-    padding: DD.s5,
+    marginBottom: DD_SPACING.lg,
     borderWidth: 1.5,
-    borderColor: DD.lime + '55',
-    marginBottom: DD.s6,
-    shadowColor: DD.lime,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
-    elevation: 4,
+    borderColor: 'rgba(191, 253, 64, 0.35)',
   },
   cardHeaderRow: {
+    marginBottom: DD_SPACING.sm,
+  },
+  verificationBadgesRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: DD.s2,
-  },
-  badgeRow: {
-    flexDirection: 'row',
-    gap: DD.s2,
-    marginBottom: DD.s2,
-  },
-  verificationBadge: {
-    fontSize: 10,
-    fontWeight: '900',
-    color: DD.lime,
-    backgroundColor: DD.lime + '18',
-    paddingVertical: 2,
-    paddingHorizontal: 8,
-    borderRadius: DD.radiusPill,
-    letterSpacing: 0.5,
-  },
-  whatsappBadge: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: DD.success,
-    backgroundColor: DD.success + '18',
-    paddingVertical: 2,
-    paddingHorizontal: 8,
-    borderRadius: DD.radiusPill,
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.xs,
   },
   cardMainTitle: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: DD.text,
-    letterSpacing: -0.3,
-  },
-  cardDescription: {
-    fontSize: 13,
-    color: DD.textSub,
-    lineHeight: 18,
-    marginBottom: DD.s4,
-  },
-  statusBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: DD.s3,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    marginBottom: DD.s4,
-    borderWidth: 1,
-  },
-  statusBannerApproved: {
-    backgroundColor: DD.success + '15',
-    borderColor: DD.success + '44',
-  },
-  statusBannerPending: {
-    backgroundColor: '#FFB80015',
-    borderColor: '#FFB80044',
-  },
-  statusBannerRejected: {
-    backgroundColor: DD.danger + '15',
-    borderColor: DD.danger + '44',
-  },
-  statusBannerIcon: {
-    fontSize: 20,
-  },
-  statusBannerTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  statusBannerSub: {
-    fontSize: 12,
-    color: DD.textSub,
     marginTop: 2,
   },
-  remindBtn: {
-    marginTop: DD.s2,
-    alignSelf: 'flex-start',
-    backgroundColor: DD.success,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: DD.radiusPill,
+  cardDescription: {
+    lineHeight: 18,
+    marginBottom: DD_SPACING.md,
   },
-  remindBtnText: {
-    color: DD.bg,
-    fontSize: 11,
-    fontWeight: '800',
+  statusCallout: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.md,
+  },
+  statusCalloutApproved: {
+    backgroundColor: 'rgba(0, 230, 118, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 230, 118, 0.25)',
+  },
+  statusCalloutPending: {
+    backgroundColor: 'rgba(255, 184, 0, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 184, 0, 0.25)',
+  },
+  statusCalloutRejected: {
+    backgroundColor: 'rgba(255, 59, 86, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 59, 86, 0.25)',
+  },
+  statusCalloutResubmission: {
+    backgroundColor: 'rgba(255, 107, 53, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 53, 0.25)',
+  },
+  modalResubmitCard: {
+    backgroundColor: 'rgba(255, 107, 53, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 107, 53, 0.3)',
+    borderRadius: DD_RADII.md,
+    padding: DD_SPACING.md,
+    marginBottom: DD_SPACING.md,
+    gap: 6,
+  },
+  modalResubmitHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  modalPrevFeedbackBox: {
+    backgroundColor: 'rgba(0, 0, 0, 0.25)',
+    borderRadius: DD_RADII.sm,
+    padding: DD_SPACING.sm,
+    borderLeftWidth: 2,
+    borderLeftColor: DD_COLORS.coral,
+    marginTop: 2,
+  },
+  modalGraceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  reviewPrevFeedbackBox: {
+    backgroundColor: 'rgba(255, 107, 53, 0.08)',
+    borderRadius: DD_RADII.sm,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 4,
+    borderLeftWidth: 2,
+    borderLeftColor: DD_COLORS.coral,
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  calloutTexts: {
+    flex: 1,
+    gap: 4,
+  },
+  calloutActionBtn: {
+    marginTop: DD_SPACING.xs,
+    alignSelf: 'flex-start',
   },
   submitActionBox: {
-    gap: DD.s2,
+    gap: DD_SPACING.sm,
   },
-  primarySubmitBtn: {
-    backgroundColor: DD.lime,
-    paddingVertical: DD.s4,
-    borderRadius: DD.radiusPill,
+  yesterdaySubmitBtn: {
+    alignSelf: 'center',
+  },
+
+  /* Reviewable Submissions Section */
+  reviewSectionHeader: {
+    marginBottom: DD_SPACING.xs,
+  },
+  reviewTitleGroup: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: DD.lime,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 5,
+    gap: DD_SPACING.sm,
   },
-  primarySubmitBtnText: {
-    color: DD.bg,
-    fontSize: 15,
-    fontWeight: '900',
-    letterSpacing: 0.3,
+  reviewSubtext: {
+    lineHeight: 18,
+    marginBottom: DD_SPACING.md,
   },
-  yesterdayBtn: {
-    alignItems: 'center',
-    paddingVertical: DD.s2,
+  reviewList: {
+    gap: DD_SPACING.md,
   },
-  yesterdayBtnText: {
-    color: DD.textSub,
-    fontSize: 12,
-    fontWeight: '600',
-    textDecorationLine: 'underline',
-  },
-  historyCard: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusLg,
-    padding: DD.s4,
+  reviewItemCard: {
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
     borderWidth: 1,
-    borderColor: DD.border,
-    marginBottom: DD.s6,
+    borderColor: DD_COLORS.borderSubtle,
+    gap: DD_SPACING.sm,
   },
+  reviewItemTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+  },
+  reviewItemMeta: {
+    flex: 1,
+  },
+  reviewNoteBox: {
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    paddingHorizontal: DD_SPACING.md,
+    paddingVertical: DD_SPACING.xs,
+    borderRadius: DD_RADII.xs,
+    borderLeftWidth: 2,
+    borderLeftColor: DD_COLORS.coral,
+  },
+  reviewNoteText: {
+    fontStyle: 'italic',
+  },
+  reviewButtonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
+  },
+  reviewBtnFlex: {
+    flex: 1,
+  },
+  reviewProofBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: DD_COLORS.bgCard,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: DD_SPACING.xs,
+    borderRadius: DD_RADII.sm,
+    marginTop: 4,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+  },
+
+  /* History Section */
   historyHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: DD.s3,
-    paddingBottom: DD.s2,
-    borderBottomWidth: 1,
-    borderBottomColor: DD.border,
-  },
-  historyTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  historyCount: {
-    fontSize: 12,
-    color: DD.textMuted,
-    fontWeight: '600',
+    marginBottom: DD_SPACING.md,
   },
   historyList: {
-    gap: DD.s3,
+    gap: DD_SPACING.sm,
   },
   historyItem: {
-    backgroundColor: DD.bgElement,
-    borderRadius: DD.radiusMd,
-    padding: DD.s3,
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
     borderWidth: 1,
-    borderColor: DD.border,
+    borderColor: DD_COLORS.borderSubtle,
+    gap: DD_SPACING.xs,
   },
   historyItemTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-  },
-  historyDate: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  historyVerifier: {
-    fontSize: 11,
-    color: DD.textSub,
-    marginTop: 2,
-  },
-  badgePill: {
-    paddingVertical: 3,
-    paddingHorizontal: 8,
-    borderRadius: DD.radiusPill,
-    borderWidth: 1,
-  },
-  badgeApproved: {
-    backgroundColor: DD.success + '22',
-    borderColor: DD.success,
-  },
-  badgeApprovedText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: DD.success,
-  },
-  badgePending: {
-    backgroundColor: '#FFB80022',
-    borderColor: '#FFB800',
-  },
-  badgePendingText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#FFB800',
-  },
-  badgeRejected: {
-    backgroundColor: DD.danger + '22',
-    borderColor: DD.danger,
-  },
-  badgeRejectedText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: DD.danger,
+    alignItems: 'center',
   },
   historyNote: {
-    fontSize: 12,
-    color: DD.textSub,
     fontStyle: 'italic',
-    marginTop: DD.s2,
+    marginTop: 2,
+  },
+  historyMetricText: {
+    marginTop: 2,
+    fontWeight: '700',
+  },
+  historyLogText: {
+    marginTop: 2,
+    fontStyle: 'italic',
   },
   rejectionReasonText: {
-    fontSize: 12,
-    color: DD.danger,
-    marginTop: 4,
-    fontWeight: '600',
+    marginTop: 2,
   },
   historyActionsRow: {
     flexDirection: 'row',
-    gap: DD.s2,
-    marginTop: DD.s3,
-    paddingTop: DD.s2,
-    borderTopWidth: 1,
-    borderTopColor: DD.border,
+    flexWrap: 'wrap',
+    gap: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
   },
-  historyActionBtn: {
-    backgroundColor: DD.lime,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: DD.radiusPill,
-  },
-  historyActionBtnText: {
-    color: DD.bg,
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  historyActionBtnSecondary: {
-    backgroundColor: DD.bgCard,
-    borderWidth: 1,
-    borderColor: DD.border,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: DD.radiusPill,
-  },
-  historyActionBtnSecondaryText: {
-    color: DD.textSub,
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  inviteCard: {
-    backgroundColor: DD.bgCard,
-    borderWidth: 1.5,
-    borderColor: DD.border,
-    borderRadius: DD.radiusLg,
-    padding: DD.s4,
-    marginBottom: DD.s6,
-  },
+
+  /* Invite Section */
   inviteHeader: {
+    marginBottom: DD_SPACING.md,
+  },
+  inviteHeaderLeft: {
+    gap: 4,
+  },
+  inviteTitleRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: DD.s3,
-  },
-  inviteTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  inviteSubtitle: {
-    fontSize: 12,
-    color: DD.textSub,
-    marginTop: 2,
-    maxWidth: 240,
-  },
-  inviteBadge: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: DD.lime,
-    backgroundColor: DD.lime + '18',
-    paddingVertical: 3,
-    paddingHorizontal: 8,
-    borderRadius: DD.radiusPill,
-    borderWidth: 1,
-    borderColor: DD.lime + '33',
+    alignItems: 'center',
+    gap: 6,
   },
   inviteButtonsRow: {
     flexDirection: 'row',
-    gap: DD.s2,
-    marginTop: DD.s2,
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.sm,
   },
-  inviteBtn: {
+  inviteBtnFlex: {
     flex: 1,
-    paddingVertical: DD.s3,
-    borderRadius: DD.radiusPill,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  inviteBtnCopy: {
-    backgroundColor: DD.bgElement,
-    borderWidth: 1,
-    borderColor: DD.border,
-  },
-  inviteBtnCopyText: {
-    color: DD.text,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  inviteBtnShare: {
-    backgroundColor: DD.lime,
-  },
-  inviteBtnShareText: {
-    color: DD.bg,
-    fontSize: 13,
-    fontWeight: '800',
   },
   linkInfoToggle: {
-    marginTop: DD.s3,
-    alignItems: 'center',
-  },
-  linkInfoToggleText: {
-    fontSize: 11,
-    color: DD.textMuted,
-    fontWeight: '600',
+    paddingVertical: DD_SPACING.xs,
+    alignSelf: 'flex-start',
   },
   linkDetailsBox: {
-    marginTop: DD.s3,
-    paddingTop: DD.s3,
-    borderTopWidth: 1,
-    borderTopColor: DD.border,
-    gap: DD.s2,
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    gap: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
   },
   urlItem: {
     gap: 2,
   },
-  urlLabel: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: DD.textMuted,
-    textTransform: 'uppercase',
-  },
-  urlValue: {
-    fontSize: 11,
-    color: DD.lime,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    backgroundColor: DD.bgElement,
-    padding: DD.s2,
-    borderRadius: DD.radiusSm,
-  },
-  urlNote: {
-    fontSize: 11,
-    color: DD.textSub,
-    fontStyle: 'italic',
-    marginTop: 2,
-  },
-  descriptionCard: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusLg,
-    padding: DD.s4,
-    borderWidth: 1,
-    borderColor: DD.border,
-  },
-  description: {
-    fontSize: 14,
-    color: DD.textSub,
+
+  /* Description & Rules */
+  descriptionText: {
     lineHeight: 22,
   },
   rulesList: {
-    gap: DD.s2,
+    gap: DD_SPACING.sm,
   },
   ruleItem: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: DD.s3,
-    backgroundColor: DD.bgCard,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    borderWidth: 1,
-    borderColor: DD.border,
+    alignItems: 'flex-start',
+    gap: DD_SPACING.md,
   },
-  ruleNumber: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
+  ruleNumberCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
     justifyContent: 'center',
-    alignItems: 'center',
-  },
-  ruleNumberText: {
-    fontSize: 12,
-    fontWeight: '800',
+    marginTop: 1,
   },
   ruleText: {
     flex: 1,
-    fontSize: 13,
-    color: DD.text,
-    fontWeight: '500',
+    lineHeight: 19,
   },
+
+  /* Bottom CTA Bar */
   ctaContainer: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: DD.bg + 'F0',
-    paddingHorizontal: DD.s5,
-    paddingTop: DD.s3,
+    backgroundColor: DD_COLORS.bgCard,
     borderTopWidth: 1,
-    borderTopColor: DD.border,
+    borderTopColor: DD_COLORS.borderSubtle,
+    paddingHorizontal: DD_SPACING.lg,
+    paddingTop: DD_SPACING.sm,
+    ...Platform.select({
+      android: { elevation: 12 },
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: -4 },
+        shadowOpacity: 0.35,
+        shadowRadius: 10,
+      },
+      default: {},
+    }),
   },
   joinedCtaRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s3,
+    gap: DD_SPACING.md,
   },
-  bottomSubmitBtn: {
-    flex: 2,
-    backgroundColor: DD.lime,
-    borderRadius: DD.radiusPill,
-    paddingVertical: DD.s4,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: DD.lime,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 6,
-  },
-  bottomSubmitBtnText: {
-    color: DD.bg,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  leaveTextBtn: {
+  bottomMainBtn: {
     flex: 1,
-    backgroundColor: DD.bgCard,
-    borderWidth: 1,
-    borderColor: DD.border,
-    paddingVertical: DD.s4,
-    borderRadius: DD.radiusPill,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
-  leaveText: {
-    color: DD.textSub,
-    fontSize: 13,
-    fontWeight: '700',
+  leaveDareBtn: {
+    paddingHorizontal: DD_SPACING.sm,
   },
-  ctaButton: {
-    borderRadius: DD.radiusPill,
-    paddingVertical: DD.s4,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 6,
-  },
-  ctaButtonJoin: {
-    shadowColor: DD.lime,
-  },
-  ctaText: {
-    fontSize: 16,
-    fontWeight: '900',
-    letterSpacing: 0.3,
-  },
-  ctaTextJoin: {
-    color: DD.bg,
-  },
-  backBtn: {
-    backgroundColor: DD.bgCard,
-    borderWidth: 1,
-    borderColor: DD.border,
-    paddingVertical: DD.s3,
-    paddingHorizontal: DD.s5,
-    borderRadius: DD.radiusPill,
-  },
-  backBtnText: {
-    color: DD.text,
-    fontSize: 14,
-    fontWeight: '700',
-  },
+
+  /* Modals */
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.75)',
     justifyContent: 'flex-end',
   },
   modalContent: {
-    backgroundColor: DD.bgCard,
-    borderTopLeftRadius: DD.radiusCard,
-    borderTopRightRadius: DD.radiusCard,
-    paddingHorizontal: DD.s5,
-    paddingTop: DD.s5,
-    paddingBottom: DD.s8,
-    maxHeight: '90%',
+    backgroundColor: DD_COLORS.bgCard,
+    borderTopLeftRadius: DD_RADII.card,
+    borderTopRightRadius: DD_RADII.card,
     borderWidth: 1,
-    borderColor: DD.border,
+    borderColor: DD_COLORS.borderProminent,
+    padding: DD_SPACING.xl,
+    maxHeight: '90%',
   },
   modalHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: DD.s4,
-    paddingBottom: DD.s3,
-    borderBottomWidth: 1,
-    borderBottomColor: DD.border,
+    alignItems: 'flex-start',
+    marginBottom: DD_SPACING.md,
   },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '900',
-    color: DD.text,
-  },
-  modalSubtitle: {
-    fontSize: 12,
-    color: DD.textSub,
-    marginTop: 2,
+  modalHeaderTexts: {
+    flex: 1,
+    paddingRight: DD_SPACING.sm,
+    gap: 2,
   },
   modalCloseBtn: {
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: DD.bgElement,
+    backgroundColor: DD_COLORS.bgElement,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  modalCloseBtnText: {
-    color: DD.textSub,
-    fontSize: 14,
-    fontWeight: '700',
+  formScroll: {
+    gap: DD_SPACING.md,
+    paddingBottom: DD_SPACING.lg,
   },
   formGroup: {
-    marginBottom: DD.s4,
+    gap: DD_SPACING.xs,
   },
   formLabel: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: DD.text,
-    marginBottom: DD.s2,
-    letterSpacing: 0.2,
-  },
-  formHint: {
-    fontSize: 11,
-    color: DD.textMuted,
-    marginTop: 4,
+    marginBottom: 2,
   },
   dateSelectorRow: {
     flexDirection: 'row',
-    gap: DD.s2,
+    gap: DD_SPACING.sm,
   },
   dateOption: {
     flex: 1,
-    backgroundColor: DD.bgElement,
-    borderWidth: 1.5,
-    borderColor: DD.border,
-    paddingVertical: DD.s3,
-    paddingHorizontal: DD.s2,
-    borderRadius: DD.radiusMd,
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 6,
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    minHeight: 48,
   },
   dateOptionActive: {
-    borderColor: DD.lime,
-    backgroundColor: DD.lime + '15',
+    borderColor: DD_COLORS.lime,
+    backgroundColor: 'rgba(191, 253, 64, 0.08)',
   },
-  dateOptionText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: DD.textSub,
+  formHint: {
+    marginTop: 2,
+    lineHeight: 14,
   },
-  dateOptionTextActive: {
-    color: DD.lime,
-    fontWeight: '800',
+  staticDateBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
   },
-  staticDateText: {
-    color: DD.lime,
-    fontSize: 13,
-    fontWeight: '800',
-    backgroundColor: DD.bgElement,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
+  noVerifiersBox: {
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    gap: DD_SPACING.sm,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 184, 0, 0.25)',
+  },
+  noVerifiersText: {
+    lineHeight: 18,
   },
   verifiersList: {
-    gap: DD.s2,
+    gap: DD_SPACING.xs,
   },
   verifierOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: DD.bgElement,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    borderWidth: 1.5,
-    borderColor: DD.border,
+    gap: DD_SPACING.sm,
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    minHeight: 52,
   },
   verifierOptionActive: {
-    borderColor: DD.lime,
-    backgroundColor: DD.lime + '12',
+    borderColor: DD_COLORS.lime,
+    backgroundColor: 'rgba(191, 253, 64, 0.06)',
   },
-  verifierOptionLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: DD.s3,
-  },
-  verifierOptionAvatar: {
-    fontSize: 20,
-  },
-  verifierOptionName: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: DD.text,
-  },
-  verifierOptionNameActive: {
-    color: DD.lime,
-  },
-  verifierOptionRole: {
-    fontSize: 11,
-    color: DD.textSub,
-    marginTop: 2,
+  verifierOptionMeta: {
+    flex: 1,
   },
   radioCircle: {
     width: 20,
     height: 20,
     borderRadius: 10,
     borderWidth: 2,
-    borderColor: DD.border,
+    borderColor: DD_COLORS.borderProminent,
     alignItems: 'center',
     justifyContent: 'center',
   },
   radioCircleActive: {
-    borderColor: DD.lime,
+    borderColor: DD_COLORS.lime,
   },
   radioDot: {
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: DD.lime,
-  },
-  noVerifiersBox: {
-    backgroundColor: DD.bgElement,
-    padding: DD.s4,
-    borderRadius: DD.radiusMd,
-    borderWidth: 1,
-    borderColor: DD.border,
-    gap: DD.s3,
-  },
-  noVerifiersText: {
-    fontSize: 12,
-    color: DD.textSub,
-    lineHeight: 18,
-  },
-  inviteFriendsAction: {
-    backgroundColor: DD.lime + '22',
-    borderWidth: 1,
-    borderColor: DD.lime,
-    paddingVertical: DD.s2,
-    paddingHorizontal: DD.s3,
-    borderRadius: DD.radiusPill,
-    alignSelf: 'flex-start',
-  },
-  inviteFriendsActionText: {
-    color: DD.lime,
-    fontSize: 12,
-    fontWeight: '800',
+    backgroundColor: DD_COLORS.lime,
   },
   textInput: {
-    backgroundColor: DD.bgElement,
-    borderRadius: DD.radiusMd,
+    backgroundColor: DD_COLORS.bgElement,
+    borderRadius: DD_RADII.md,
     borderWidth: 1,
-    borderColor: DD.border,
-    padding: DD.s3,
-    color: DD.text,
-    fontSize: 13,
-    minHeight: 60,
+    borderColor: DD_COLORS.borderSubtle,
+    padding: DD_SPACING.md,
+    color: DD_COLORS.text,
+    fontSize: 14,
+    minHeight: 80,
     textAlignVertical: 'top',
   },
-  infoNoticeBox: {
-    backgroundColor: DD.bgElevated,
-    borderRadius: DD.radiusMd,
-    padding: DD.s3,
-    marginBottom: DD.s4,
+  peerConfirmationCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
     borderWidth: 1,
-    borderColor: DD.border,
+    borderColor: 'rgba(191, 253, 64, 0.25)',
   },
-  infoNoticeTitle: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: DD.lime,
-    marginBottom: 4,
+  infoNoticeBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: DD_SPACING.sm,
+    backgroundColor: 'rgba(0, 212, 255, 0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 212, 255, 0.2)',
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
   },
   infoNoticeBody: {
-    fontSize: 11,
-    color: DD.textSub,
-    lineHeight: 16,
-  },
-  errorBox: {
-    backgroundColor: DD.danger + '22',
-    borderWidth: 1,
-    borderColor: DD.danger,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    marginBottom: DD.s4,
-  },
-  errorText: {
-    fontSize: 12,
-    color: DD.danger,
-    fontWeight: '600',
-  },
-  modalSubmitActionBtn: {
-    backgroundColor: DD.lime,
-    paddingVertical: DD.s4,
-    borderRadius: DD.radiusPill,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: DD.s2,
-  },
-  modalSubmitActionBtnText: {
-    color: DD.bg,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  btnDisabled: {
-    opacity: 0.5,
-  },
-  successStateBox: {
-    alignItems: 'center',
-    paddingVertical: DD.s4,
-    gap: DD.s3,
-  },
-  successIcon: {
-    fontSize: 48,
-  },
-  successTitle: {
-    fontSize: 20,
-    fontWeight: '900',
-    color: DD.text,
-  },
-  successMsg: {
-    fontSize: 13,
-    color: DD.textSub,
-    textAlign: 'center',
-    maxWidth: 280,
-  },
-  successProofBox: {
-    backgroundColor: DD.bgElement,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    borderWidth: 1,
-    borderColor: DD.border,
-    marginVertical: DD.s2,
-  },
-  successProofNotice: {
-    fontSize: 12,
-    color: DD.lime,
-    textAlign: 'center',
-    fontWeight: '600',
+    flex: 1,
     lineHeight: 18,
   },
-  whatsAppShareBtn: {
-    backgroundColor: DD.success,
-    paddingVertical: DD.s4,
-    paddingHorizontal: DD.s6,
-    borderRadius: DD.radiusPill,
-    width: '100%',
+  errorBox: {
+    flexDirection: 'row',
     alignItems: 'center',
-    shadowColor: DD.success,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  whatsAppShareBtnText: {
-    color: DD.bg,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  modalDoneBtn: {
-    paddingVertical: DD.s3,
-  },
-  modalDoneBtnText: {
-    color: DD.textSub,
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  reviewSectionCard: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusCard,
-    padding: DD.s5,
+    gap: 6,
+    backgroundColor: 'rgba(255, 59, 86, 0.1)',
     borderWidth: 1,
-    borderColor: '#FFB80066',
-    gap: DD.s3,
+    borderColor: 'rgba(255, 59, 86, 0.3)',
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
   },
-  reviewSectionHeader: {
+  errorText: {
+    flex: 1,
+  },
+  modalSubmitActionBtn: {
+    marginTop: DD_SPACING.xs,
+  },
+  modalListContainer: {
+    gap: DD_SPACING.xs,
+    marginVertical: DD_SPACING.md,
+  },
+  modalInputBox: {
+    marginVertical: DD_SPACING.md,
+  },
+
+  /* Success State in Modal */
+  successStateBox: {
+    alignItems: 'center',
+    paddingVertical: DD_SPACING.lg,
+    gap: DD_SPACING.sm,
+  },
+  successIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(191, 253, 64, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: DD_SPACING.xs,
+  },
+  successMsg: {
+    maxWidth: 280,
+    lineHeight: 18,
+  },
+  successProofBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: DD_SPACING.sm,
+    backgroundColor: 'rgba(0, 212, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 212, 255, 0.25)',
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    marginVertical: DD_SPACING.sm,
+  },
+  successProofNotice: {
+    flex: 1,
+    lineHeight: 18,
+  },
+  modalSuccessBtn: {
+    marginTop: DD_SPACING.xs,
+  },
+  successProofDetailsBox: {
+    width: '100%',
+    backgroundColor: DD_COLORS.bgElement,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    padding: DD_SPACING.md,
+    gap: DD_SPACING.xs,
+    marginVertical: DD_SPACING.xs,
+  },
+  proofCodeRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
-  reviewTitleRow: {
+  proofCodeBadge: {
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(191, 253, 64, 0.4)',
+    paddingHorizontal: DD_SPACING.md,
+    paddingVertical: 4,
+    borderRadius: DD_RADII.sm,
+  },
+  proofCodeText: {
+    letterSpacing: 2,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  proofActionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 4,
+  },
+
+  /* Dynamic Proof Challenge Styles in Form */
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: DD_SPACING.xs,
+  },
+  generateProofPromptBox: {
+    backgroundColor: DD_COLORS.bgElement,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    borderRadius: DD_RADII.md,
+    padding: DD_SPACING.md,
+    gap: DD_SPACING.xs,
+  },
+  generateProofHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s2,
   },
-  reviewIcon: {
-    fontSize: 20,
+  generateProofDesc: {
+    lineHeight: 18,
+    marginVertical: DD_SPACING.xs,
   },
-  reviewMainTitle: {
-    fontSize: 17,
-    fontWeight: '900',
-    color: DD.text,
+  generateProofBtn: {
+    marginTop: DD_SPACING.xs,
   },
-  reviewBadge: {
-    backgroundColor: '#FFB80022',
-    paddingHorizontal: DD.s3,
-    paddingVertical: DD.s1,
-    borderRadius: DD.radiusPill,
+  proofErrorBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 75, 75, 0.1)',
+    padding: DD_SPACING.sm,
+    borderRadius: DD_RADII.sm,
+    marginVertical: DD_SPACING.xs,
+  },
+  dateChangeNoticeBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 184, 0, 0.12)',
     borderWidth: 1,
-    borderColor: '#FFB800',
+    borderColor: 'rgba(255, 184, 0, 0.3)',
+    borderRadius: DD_RADII.sm,
+    paddingVertical: DD_SPACING.xs,
+    paddingHorizontal: DD_SPACING.sm,
+    marginTop: DD_SPACING.xs,
+    marginBottom: DD_SPACING.xs,
   },
-  reviewBadgeText: {
-    color: '#FFB800',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  reviewSubtext: {
-    fontSize: 12,
-    color: DD.textSub,
-    lineHeight: 17,
-  },
-  reviewList: {
-    gap: DD.s3,
-  },
-  reviewItemCard: {
-    backgroundColor: DD.bgElement,
-    borderRadius: DD.radiusMd,
-    padding: DD.s4,
+  proofCard: {
+    backgroundColor: DD_COLORS.bgHighlight,
     borderWidth: 1,
-    borderColor: DD.border,
-    gap: DD.s2,
+    borderColor: 'rgba(191, 253, 64, 0.35)',
+    borderRadius: DD_RADII.lg,
+    padding: DD_SPACING.md,
+    gap: DD_SPACING.sm,
   },
-  reviewItemTop: {
+  proofCardExpired: {
+    borderColor: 'rgba(255, 75, 75, 0.4)',
+    backgroundColor: 'rgba(255, 75, 75, 0.05)',
+  },
+  proofHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
   },
-  reviewSubmitterName: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: DD.text,
+  proofCodeTag: {
+    gap: 2,
   },
-  reviewDateText: {
-    fontSize: 11,
-    color: DD.textMuted,
-    marginTop: 2,
+  proofCodeMonospace: {
+    fontSize: 28,
+    letterSpacing: 4,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  reviewNoteBox: {
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusSm,
-    padding: DD.s3,
-    borderWidth: 1,
-    borderColor: DD.border,
-  },
-  reviewNoteText: {
-    fontSize: 12,
-    color: DD.text,
-    fontStyle: 'italic',
-  },
-  reviewButtonsRow: {
+  proofTtlBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s2,
-    marginTop: DD.s1,
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 4,
+    borderRadius: DD_RADII.full,
   },
-  quickApproveBtn: {
-    flex: 1,
-    backgroundColor: DD.lime,
-    paddingVertical: DD.s2 + 2,
-    borderRadius: DD.radiusPill,
+  proofExpiredBanner: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 75, 75, 0.12)',
+    padding: DD_SPACING.sm,
+    borderRadius: DD_RADII.sm,
   },
-  quickApproveText: {
-    color: DD.bg,
-    fontWeight: '800',
-    fontSize: 13,
-  },
-  quickRejectBtn: {
-    flex: 1,
-    backgroundColor: DD.bgCard,
-    paddingVertical: DD.s2 + 2,
-    borderRadius: DD.radiusPill,
-    alignItems: 'center',
-    justifyContent: 'center',
+  proofActionBox: {
+    backgroundColor: DD_COLORS.bgCard,
+    padding: DD_SPACING.sm,
+    borderRadius: DD_RADII.md,
     borderWidth: 1,
-    borderColor: DD.danger + '88',
+    borderColor: DD_COLORS.borderSubtle,
+    gap: 4,
   },
-  quickRejectText: {
-    color: DD.danger,
-    fontWeight: '800',
-    fontSize: 13,
+  proofActionLabel: {
+    fontSize: 10,
+    letterSpacing: 0.5,
   },
-  detailsReviewBtn: {
-    paddingHorizontal: DD.s3,
-    paddingVertical: DD.s2,
+  proofActionPrompt: {
+    lineHeight: 20,
   },
-  detailsReviewBtnText: {
-    color: DD.lime,
-    fontWeight: '700',
-    fontSize: 12,
+  proofInstructionText: {
+    lineHeight: 17,
   },
-  modalConfirmRejectBtn: {
-    backgroundColor: DD.danger,
-    paddingHorizontal: DD.s5,
-    paddingVertical: DD.s3,
-    borderRadius: DD.radiusPill,
-    minWidth: 120,
-    alignItems: 'center',
-  },
-  modalConfirmRejectText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-});
 
-const detailStatStyles = StyleSheet.create({
-  box: {
-    flex: 1,
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusLg,
-    paddingVertical: DD.s3,
-    paddingHorizontal: DD.s2,
-    alignItems: 'center',
+  /* Reassign Advisory Notice */
+  reassignNoticeBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: DD_SPACING.xs,
+    backgroundColor: 'rgba(0, 212, 255, 0.08)',
     borderWidth: 1,
-    borderColor: DD.border,
+    borderColor: 'rgba(0, 212, 255, 0.25)',
+    padding: DD_SPACING.sm,
+    borderRadius: DD_RADII.md,
+    marginBottom: DD_SPACING.md,
   },
-  icon: {
-    fontSize: 20,
-    marginBottom: DD.s1,
+  reassignNoticeText: {
+    flex: 1,
+    lineHeight: 17,
   },
-  value: {
-    fontSize: 17,
-    fontWeight: '900',
-    letterSpacing: -0.5,
+
+  /* Invite Friends Modal */
+  friendsLoadingBox: {
+    paddingVertical: DD_SPACING['3xl'],
+    alignItems: 'center',
   },
-  label: {
-    fontSize: 11,
-    color: DD.textMuted,
-    fontWeight: '600',
-    marginTop: 2,
+  friendsEmptyBox: {
+    paddingVertical: DD_SPACING.xl,
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+  },
+  friendsEmptyIconCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: DD_COLORS.bgHighlight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  friendsEmptyDesc: {
+    maxWidth: 280,
+    lineHeight: 18,
+    marginBottom: DD_SPACING.sm,
+  },
+  friendsListScroll: {
+    marginTop: DD_SPACING.xs,
+  },
+  friendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: DD_COLORS.bgElement,
+    padding: DD_SPACING.md,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    marginBottom: DD_SPACING.xs,
+    minHeight: 56,
+  },
+  friendRowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    flex: 1,
+    paddingRight: DD_SPACING.sm,
+  },
+  friendMeta: {
+    flex: 1,
   },
 });

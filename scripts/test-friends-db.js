@@ -9,12 +9,32 @@ const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
-const DB_CONFIG = {
-  host: process.env.TEST_PGHOST || '/home/umardinkhan/.gemini/antigravity-ide/brain/89949ad1-3a09-435c-b590-2815756775fb/scratch',
-  port: parseInt(process.env.TEST_PGPORT || '54333', 10),
-  database: 'postgres',
-  user: 'postgres',
-};
+function getDatabaseConfig() {
+  const dbUrl = process.env.DATABASE_URL ? process.env.DATABASE_URL.trim() : null;
+  if (dbUrl) {
+    // Safety guard: prevent accidental destructive TRUNCATE against production Supabase instances
+    if (dbUrl.includes('supabase.co')) {
+      console.error('\n❌ SAFETY ABORT: DATABASE_URL points to a Supabase host.');
+      console.error('This integration test performs destructive TRUNCATE on application tables.');
+      console.error('It must only be executed against a dedicated, isolated local or test PostgreSQL instance.\n');
+      process.exit(1);
+    }
+    return { connectionString: dbUrl };
+  }
+
+  // Preserve test harness workflow if an explicit host is configured via environment variables
+  if (process.env.TEST_PGHOST && process.env.TEST_PGHOST.trim()) {
+    return {
+      host: process.env.TEST_PGHOST.trim(),
+      port: parseInt(process.env.TEST_PGPORT || '5432', 10),
+      database: process.env.TEST_PGDATABASE || 'postgres',
+      user: process.env.TEST_PGUSER || 'postgres',
+      password: process.env.TEST_PGPASSWORD || undefined,
+    };
+  }
+
+  return null;
+}
 
 let passed = 0;
 let failed = 0;
@@ -40,10 +60,24 @@ async function resetSession(client) {
 }
 
 async function runRealDbTests() {
-  console.log('🐘 Starting DareDrop Friends & Social Challenges Real PostgreSQL Integration Suite...\n');
-  console.log(`Connected to isolated PostgreSQL test instance at ${DB_CONFIG.host}:${DB_CONFIG.port}\n`);
+  const config = getDatabaseConfig();
+  if (!config) {
+    console.log('🐘 DareDrop Friends Live PostgreSQL Integration Suite');
+    console.log('⚠️  SKIPPED: DATABASE_URL is not set.\n');
+    console.log('To run this live integration suite against an isolated, disposable PostgreSQL database:');
+    console.log('  DATABASE_URL="postgresql://USER:PASSWORD@HOST:PORT/DATABASE" node ./scripts/test-friends-db.js\n');
+    console.log('Note: This suite executes TRUNCATE TABLE public.challenge_participants, public.friendships, etc.');
+    console.log('Never run this suite against a production database.\n');
+    return;
+  }
 
-  const pool = new Pool(DB_CONFIG);
+  console.log('🐘 Starting DareDrop Friends & Social Challenges Real PostgreSQL Integration Suite...\n');
+  const targetDesc = config.connectionString
+    ? config.connectionString.replace(/:([^:@]+)@/, ':****@')
+    : `${config.host}:${config.port}/${config.database}`;
+  console.log(`Connected to isolated PostgreSQL test instance at ${targetDesc}\n`);
+
+  const pool = new Pool(config);
 
   try {
     // Verify connectivity

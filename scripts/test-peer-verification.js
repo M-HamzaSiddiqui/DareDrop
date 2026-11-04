@@ -258,6 +258,66 @@ function testSubmissionClientIntegration() {
   assert.strictEqual(verifierCall.params.p_challenge_id, 'c-123');
   console.log('  ✅ get_challenge_eligible_verifiers parameter signature matches (p_challenge_id).');
 
+  // Verify offline submitCompletion challenge_type derivation
+  const storeSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/store/challenges-store.tsx'), 'utf8');
+  assert.strictEqual(
+    storeSrc.includes("challenge_type: derivedChallengeType"),
+    true,
+    'Store must assign derivedChallengeType to offline completion'
+  );
+  assert.strictEqual(
+    storeSrc.includes("targetChallenge?.challengeType === 'one_time' ? 'one_time' : 'daily'"),
+    true,
+    'Store must derive challenge_type from targetChallenge.challengeType'
+  );
+
+  function simulateOfflineSubmitCompletion(challenge, params, currentUserId) {
+    const targetChallenge = challenge;
+    const derivedChallengeType =
+      targetChallenge?.challengeType === 'one_time' ? 'one_time' : 'daily';
+
+    return {
+      id: 'local_comp_mock',
+      challenge_id: params.challengeId,
+      challenge_type: derivedChallengeType,
+      participant_id: currentUserId || 'local_user',
+      verifier_id: params.verifierId,
+      completion_date: params.completionDate,
+      status: 'pending',
+      submission_note: params.submissionNote || null,
+      rejection_reason: null,
+      submitted_at: '2026-10-31T12:00:00.000Z',
+      reviewed_at: null,
+    };
+  }
+
+  const oneTimeChallenge = { id: 'c-onetime', challengeType: 'one_time' };
+  const dailyChallenge = { id: 'c-daily', challengeType: 'daily' };
+
+  const oneTimeCompletion = simulateOfflineSubmitCompletion(oneTimeChallenge, {
+    challengeId: 'c-onetime',
+    verifierId: 'u-v1',
+    completionDate: '2026-10-31',
+  }, 'u-sub');
+  assert.strictEqual(oneTimeCompletion.challenge_type, 'one_time');
+  console.log('  ✅ Offline One-Time Dare completion correctly derives and retains "one_time" challenge_type.');
+
+  const dailyCompletion = simulateOfflineSubmitCompletion(dailyChallenge, {
+    challengeId: 'c-daily',
+    verifierId: 'u-v1',
+    completionDate: '2026-10-31',
+  }, 'u-sub');
+  assert.strictEqual(dailyCompletion.challenge_type, 'daily');
+  console.log('  ✅ Offline Daily Dare completion correctly derives and retains "daily" challenge_type.');
+
+  const fallbackCompletion = simulateOfflineSubmitCompletion(undefined, {
+    challengeId: 'c-missing',
+    verifierId: 'u-v1',
+    completionDate: '2026-10-31',
+  }, 'u-sub');
+  assert.strictEqual(fallbackCompletion.challenge_type, 'daily');
+  console.log('  ✅ Offline missing challenge fallback safely defaults to "daily".');
+
 
   // 2. Date calculation in timezone
   function getChallengeDatesSim(timeZone = 'UTC') {

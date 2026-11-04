@@ -1,25 +1,101 @@
 import { router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
-  Text,
   TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { CATEGORY_COLORS, CATEGORY_EMOJIS, CategoryKey, DD } from '@/constants/dd-theme';
+import {
+  CATEGORY_COLORS,
+  CategoryKey,
+  DD_COLORS,
+  DD_RADII,
+  DD_SPACING,
+} from '@/constants/dd-theme';
+import { ProofConfig, ProofMethod } from '@/data/challenges';
+import { DDBadge } from '@/components/ui/dd-badge';
+import { DDButton } from '@/components/ui/dd-button';
+import { DDCard } from '@/components/ui/dd-card';
+import { DDIcon, type DDIconName } from '@/components/ui/dd-icon';
+import { DDText } from '@/components/ui/dd-text';
+import { useToast, sanitizeUserErrorMessage } from '@/components/ui/dd-toast';
 import { useAuth } from '@/lib/auth-context';
 import { useChallenges } from '@/store/challenges-store';
 
 const CATEGORIES: CategoryKey[] = ['Fitness', 'Focus', 'Fun', 'Learning'];
 const PRESET_DURATIONS = [7, 14, 21, 30];
+
+const CATEGORY_ICONS: Record<CategoryKey, DDIconName> = {
+  Fitness: 'flame',
+  Focus: 'target',
+  Fun: 'sparkle',
+  Learning: 'compass',
+};
+
+const PROOF_METHODS: {
+  id: ProofMethod;
+  title: string;
+  badge: string;
+  description: string;
+  icon: DDIconName;
+}[] = [
+  {
+    id: 'physical_action',
+    title: 'Gesture + Code',
+    badge: 'Anti-Cheat',
+    description: 'Evidence showing a 4-character code and a random physical gesture',
+    icon: 'shield-check',
+  },
+  {
+    id: 'photo_code',
+    title: 'Photo + Code',
+    badge: 'Visual',
+    description: 'Photo showing a unique 4-character code on paper or screen',
+    icon: 'sparkle',
+  },
+  {
+    id: 'numeric_entry',
+    title: 'Number',
+    badge: 'Metric',
+    description: 'Log an amount or count (e.g. km, reps, pages, minutes)',
+    icon: 'target',
+  },
+  {
+    id: 'text_log',
+    title: 'Written Log',
+    badge: 'Reflection',
+    description: 'Write a short reflection or summary (5 to 500 characters)',
+    icon: 'compass',
+  },
+  {
+    id: 'peer_confirmation',
+    title: 'Peer Confirmation',
+    badge: 'Quick',
+    description: 'Referee or peer directly vouches that you completed the dare',
+    icon: 'users',
+  },
+];
+
+function getDefaultProofMethod(cat: CategoryKey): ProofMethod {
+  switch (cat) {
+    case 'Fitness':
+      return 'physical_action';
+    case 'Focus':
+    case 'Learning':
+      return 'text_log';
+    case 'Fun':
+      return 'photo_code';
+    default:
+      return 'physical_action';
+  }
+}
 
 interface FormState {
   title: string;
@@ -29,6 +105,10 @@ interface FormState {
   durationDays: number;
   useCustomDeadline: boolean;
   customDays: string;
+  proofMethod: ProofMethod;
+  proofUnit: string;
+  proofMinValue: string;
+  proofMaxValue: string;
 }
 
 interface FormErrors {
@@ -36,12 +116,28 @@ interface FormErrors {
   description?: string;
   category?: string;
   customDays?: string;
+  proofUnit?: string;
+  proofRange?: string;
 }
 
+/**
+ * DareDrop Redesigned Create Dare Screen.
+ *
+ * Implements:
+ * - Clean header with branding and backend connectivity badge
+ * - Character-counted Title and Description inputs with accessible contrast
+ * - Visual Dare Type selector cards (Daily Dare vs One-Time Dare) with lime accenting
+ * - Category grid with Phosphor vector icons and signature category tints
+ * - Preset vs Custom duration selector with computed target end date preview
+ * - Live Dare Summary Preview card showing real-time configuration
+ * - High-impact Launch CTA with duplicate-submit protection and loading states
+ * - Frictionless Success state with direct challenge navigation and deep-link generation
+ */
 export default function CreateScreen() {
   const insets = useSafeAreaInsets();
   const { createChallenge, refreshChallenges, isBackendConnected } = useChallenges();
   const { isGuest, showAuthModal } = useAuth();
+  const toast = useToast();
 
   const [form, setForm] = useState<FormState>({
     title: '',
@@ -51,7 +147,12 @@ export default function CreateScreen() {
     durationDays: 14,
     useCustomDeadline: false,
     customDays: '45',
+    proofMethod: 'physical_action',
+    proofUnit: '',
+    proofMinValue: '',
+    proofMaxValue: '',
   });
+  const [hasManuallySelectedMethod, setHasManuallySelectedMethod] = useState(false);
   const [errors, setErrors] = useState<FormErrors>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -105,6 +206,25 @@ export default function CreateScreen() {
       }
     }
 
+    if (form.proofMethod === 'numeric_entry') {
+      if (form.proofUnit.trim().length > 12) {
+        e.proofUnit = 'Unit must be 12 characters or less';
+      }
+      const minVal = parseFloat(form.proofMinValue);
+      const maxVal = parseFloat(form.proofMaxValue);
+      if (!isNaN(minVal) && minVal < 0) {
+        e.proofRange = 'Minimum value must be at least 0';
+      } else if (!isNaN(maxVal) && maxVal < 0) {
+        e.proofRange = 'Maximum value must be at least 0';
+      } else if (!isNaN(minVal) && minVal > 1000000) {
+        e.proofRange = 'Minimum value cannot exceed 1,000,000';
+      } else if (!isNaN(maxVal) && maxVal > 1000000) {
+        e.proofRange = 'Maximum value cannot exceed 1,000,000';
+      } else if (!isNaN(minVal) && !isNaN(maxVal) && minVal > maxVal) {
+        e.proofRange = 'Minimum value cannot be greater than maximum value';
+      }
+    }
+
     return e;
   }
 
@@ -115,7 +235,11 @@ export default function CreateScreen() {
     if (Object.keys(e).length > 0) return;
 
     if (isGuest) {
-      showAuthModal('Account required to create a Dare. Sign in or register to publish challenges!');
+      showAuthModal({
+        title: 'Sign In to Create Dare',
+        description: 'Account required to create a Dare. Sign in or register to publish challenges!',
+        onSuccess: handleSubmit,
+      });
       return;
     }
 
@@ -125,6 +249,21 @@ export default function CreateScreen() {
       const endsAt = new Date();
       endsAt.setDate(endsAt.getDate() + effectiveDurationDays);
 
+      const proofConfig: ProofConfig = {};
+      if (form.proofMethod === 'numeric_entry') {
+        if (form.proofUnit.trim()) {
+          proofConfig.unit = form.proofUnit.trim();
+        }
+        if (form.proofMinValue.trim()) {
+          const minNum = parseFloat(form.proofMinValue.trim());
+          if (!isNaN(minNum)) proofConfig.min_value = minNum;
+        }
+        if (form.proofMaxValue.trim()) {
+          const maxNum = parseFloat(form.proofMaxValue.trim());
+          if (!isNaN(maxNum)) proofConfig.max_value = maxNum;
+        }
+      }
+
       const newChallenge = await createChallenge({
         title: form.title.trim(),
         description: form.description.trim(),
@@ -133,14 +272,19 @@ export default function CreateScreen() {
         endsAt,
         creator: 'You',
         challengeType: form.challengeType,
+        proofMethod: form.proofMethod,
+        proofConfig,
       });
 
       await refreshChallenges().catch(() => {});
 
       setCreatedId(newChallenge.id);
       setSubmitted(true);
+      toast.success('Dare published successfully!');
     } catch (err: any) {
-      setSubmitError(err?.message || 'Failed to create challenge. Please try again.');
+      const msg = sanitizeUserErrorMessage(err?.message, 'Failed to create challenge. Please try again.');
+      setSubmitError(msg);
+      toast.error(msg);
     } finally {
       setIsSubmitting(false);
     }
@@ -155,7 +299,12 @@ export default function CreateScreen() {
       durationDays: 14,
       useCustomDeadline: false,
       customDays: '45',
+      proofMethod: 'physical_action',
+      proofUnit: '',
+      proofMinValue: '',
+      proofMaxValue: '',
     });
+    setHasManuallySelectedMethod(false);
     setErrors({});
     setSubmitError(null);
     setSubmitted(false);
@@ -175,178 +324,404 @@ export default function CreateScreen() {
   return (
     <KeyboardAvoidingView
       style={styles.root}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <StatusBar style="light" />
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={[
           styles.content,
-          { paddingTop: insets.top + DD.s5, paddingBottom: insets.bottom + 120 },
+          { paddingTop: insets.top + DD_SPACING.lg, paddingBottom: insets.bottom + 110 },
         ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled">
-        {/* Header */}
+        {/* A. Header Section */}
         <View style={styles.headerRow}>
-          <View>
-            <Text style={styles.headline}>Create a{'\n'}Challenge</Text>
-            <Text style={styles.subline}>Dare yourself and others to be better.</Text>
+          <View style={styles.headerTexts}>
+            <View style={styles.brandRow}>
+              <View style={styles.flameIconWrapper}>
+                <DDIcon name="plus" size={14} color={DD_COLORS.lime} weight="bold" />
+              </View>
+              <DDText variant="caption" color="lime" bold style={styles.tagline}>
+                NEW CHALLENGE
+              </DDText>
+            </View>
+            <DDText variant="display" color="primary" style={styles.headline}>
+              Create a Dare
+            </DDText>
+            <DDText variant="bodySm" color="secondary" style={styles.subline}>
+              Dare yourself and invite others to be better.
+            </DDText>
           </View>
+
           <View
             style={[
               styles.backendBadge,
               isBackendConnected ? styles.backendBadgeOnline : styles.backendBadgeLocal,
             ]}>
-            <Text
+            <View
               style={[
-                styles.backendBadgeText,
-                isBackendConnected ? styles.backendBadgeTextOnline : styles.backendBadgeTextLocal,
-              ]}>
-              {isBackendConnected ? '● Cloud Synced' : '○ Local Mode'}
-            </Text>
+                styles.backendDot,
+                { backgroundColor: isBackendConnected ? DD_COLORS.success : DD_COLORS.warning },
+              ]}
+            />
+            <DDText
+              variant="caption"
+              bold
+              style={{
+                color: isBackendConnected ? DD_COLORS.success : DD_COLORS.warning,
+                fontSize: 10,
+              }}>
+              {isBackendConnected ? 'Cloud Synced' : 'Local Mode'}
+            </DDText>
           </View>
         </View>
 
         {/* Global error banner */}
         {submitError ? (
           <View style={styles.errorBanner}>
-            <Text style={styles.errorBannerIcon}>⚠️</Text>
-            <Text style={styles.errorBannerText}>{submitError}</Text>
+            <DDIcon name="warning" size={18} color={DD_COLORS.danger} weight="bold" />
+            <DDText variant="bodySm" color="danger" style={styles.errorBannerText}>
+              {submitError}
+            </DDText>
           </View>
         ) : null}
 
-        {/* Title field */}
-        <FormField label="Challenge Title" error={errors.title} required>
-          <TextInput
-            style={[styles.input, errors.title && styles.inputError]}
-            placeholder="e.g. 30-Day Morning Run"
-            placeholderTextColor={DD.textMuted}
-            value={form.title}
-            onChangeText={(v) => {
-              setForm((f) => ({ ...f, title: v }));
-              if (errors.title) setErrors((e) => ({ ...e, title: undefined }));
-            }}
-            maxLength={80}
-            returnKeyType="next"
-            accessibilityLabel="Challenge title"
-            editable={!isSubmitting}
-          />
-          <Text style={styles.charCount}>{form.title.length}/80</Text>
+        {/* B. Title Field */}
+        <FormField label="Dare Title" error={errors.title} required>
+          <View style={[styles.inputCard, errors.title && styles.inputCardError]}>
+            <TextInput
+              style={styles.textInput}
+              placeholder="e.g. 30-Day Morning Pushups"
+              placeholderTextColor={DD_COLORS.textMuted}
+              value={form.title}
+              onChangeText={(v) => {
+                setForm((f) => ({ ...f, title: v }));
+                if (errors.title) setErrors((e) => ({ ...e, title: undefined }));
+              }}
+              maxLength={80}
+              returnKeyType="next"
+              accessibilityLabel="Dare title input"
+              editable={!isSubmitting}
+            />
+            <DDText variant="caption" color="muted" style={styles.charCount}>
+              {form.title.length}/80
+            </DDText>
+          </View>
         </FormField>
 
-        {/* Description field */}
-        <FormField label="Description" error={errors.description} required>
-          <TextInput
-            style={[styles.input, styles.textArea, errors.description && styles.inputError]}
-            placeholder="Describe what participants will do, how to track progress, and why it matters…"
-            placeholderTextColor={DD.textMuted}
-            value={form.description}
-            onChangeText={(v) => {
-              setForm((f) => ({ ...f, description: v }));
-              if (errors.description) setErrors((e) => ({ ...e, description: undefined }));
-            }}
-            multiline
-            numberOfLines={4}
-            textAlignVertical="top"
-            accessibilityLabel="Challenge description"
-            editable={!isSubmitting}
-          />
+        {/* C. Description Field */}
+        <FormField label="Description & Instructions" error={errors.description} required>
+          <View style={[styles.inputCard, errors.description && styles.inputCardError]}>
+            <TextInput
+              style={[styles.textInput, styles.textAreaInput]}
+              placeholder="Explain what participants will do daily and how they will prove completion…"
+              placeholderTextColor={DD_COLORS.textMuted}
+              value={form.description}
+              onChangeText={(v) => {
+                setForm((f) => ({ ...f, description: v }));
+                if (errors.description) setErrors((e) => ({ ...e, description: undefined }));
+              }}
+              multiline
+              numberOfLines={4}
+              textAlignVertical="top"
+              accessibilityLabel="Dare description input"
+              editable={!isSubmitting}
+            />
+            <DDText variant="caption" color="muted" style={styles.charCount}>
+              {form.description.length} chars (min 20)
+            </DDText>
+          </View>
         </FormField>
 
-        {/* Dare Type selector */}
+        {/* D. Dare Type Selector */}
         <FormField label="Dare Type" required>
           <View style={styles.typeSelectorRow}>
+            {/* Daily Dare Card */}
             <Pressable
               onPress={() => {
                 if (isSubmitting) return;
                 setForm((f) => ({ ...f, challengeType: 'daily' }));
               }}
+              android_ripple={{ color: 'rgba(191, 253, 64, 0.1)', borderless: false }}
               style={({ pressed }) => [
                 styles.typeCard,
                 form.challengeType === 'daily' && styles.typeCardActive,
-                pressed && { opacity: 0.8 },
+                pressed && styles.cardPressed,
               ]}
               accessibilityRole="radio"
               accessibilityLabel="Daily Dare"
               accessibilityState={{ checked: form.challengeType === 'daily' }}>
               <View style={styles.typeHeaderRow}>
-                <Text style={styles.typeEmoji}>🔥</Text>
-                <Text
+                <View
                   style={[
-                    styles.typeTitle,
-                    form.challengeType === 'daily' && styles.typeTitleActive,
+                    styles.typeIconCircle,
+                    form.challengeType === 'daily' && styles.typeIconCircleActive,
                   ]}>
-                  Daily Dare
-                </Text>
+                  <DDIcon
+                    name="flame"
+                    size={20}
+                    color={form.challengeType === 'daily' ? DD_COLORS.lime : DD_COLORS.textMuted}
+                    weight="fill"
+                  />
+                </View>
+                <View style={styles.typeTitleCol}>
+                  <DDText
+                    variant="label"
+                    bold
+                    color={form.challengeType === 'daily' ? 'lime' : 'primary'}
+                    style={styles.typeTitle}>
+                    Daily Dare
+                  </DDText>
+                  <DDBadge label="Streaks" variant="lime" size="sm" />
+                </View>
               </View>
-              <Text style={styles.typeDescription}>
-                Recurring daily progress and verification. Build a streak day by day.
-              </Text>
+              <DDText variant="bodySm" color="secondary" style={styles.typeDescription}>
+                Recurring daily progress with streak badges. Submit proof every calendar day.
+              </DDText>
             </Pressable>
 
+            {/* One-Time Dare Card */}
             <Pressable
               onPress={() => {
                 if (isSubmitting) return;
                 setForm((f) => ({ ...f, challengeType: 'one_time' }));
               }}
+              android_ripple={{ color: 'rgba(155, 89, 255, 0.1)', borderless: false }}
               style={({ pressed }) => [
                 styles.typeCard,
-                form.challengeType === 'one_time' && styles.typeCardActive,
-                pressed && { opacity: 0.8 },
+                form.challengeType === 'one_time' && styles.typeCardActiveViolet,
+                pressed && styles.cardPressed,
               ]}
               accessibilityRole="radio"
               accessibilityLabel="One-Time Dare"
               accessibilityState={{ checked: form.challengeType === 'one_time' }}>
               <View style={styles.typeHeaderRow}>
-                <Text style={styles.typeEmoji}>🎯</Text>
-                <Text
+                <View
                   style={[
-                    styles.typeTitle,
-                    form.challengeType === 'one_time' && styles.typeTitleActive,
+                    styles.typeIconCircle,
+                    form.challengeType === 'one_time' && styles.typeIconCircleActiveViolet,
                   ]}>
-                  One-Time Dare
-                </Text>
+                  <DDIcon
+                    name="target"
+                    size={20}
+                    color={form.challengeType === 'one_time' ? DD_COLORS.purple : DD_COLORS.textMuted}
+                    weight="bold"
+                  />
+                </View>
+                <View style={styles.typeTitleCol}>
+                  <DDText
+                    variant="label"
+                    bold
+                    color={form.challengeType === 'one_time' ? 'purple' : 'primary'}
+                    style={styles.typeTitle}>
+                    One-Time Dare
+                  </DDText>
+                  <DDBadge label="Milestone" variant="purple" size="sm" />
+                </View>
               </View>
-              <Text style={styles.typeDescription}>
-                One milestone, verified once. Complete the dare before the target deadline.
-              </Text>
+              <DDText variant="bodySm" color="secondary" style={styles.typeDescription}>
+                One milestone goal verified once. Complete before the target countdown expires.
+              </DDText>
             </Pressable>
           </View>
         </FormField>
 
-        {/* Category selector */}
+        {/* E. Category Selector */}
         <FormField label="Category" error={errors.category} required>
           <View style={styles.categoryGrid}>
             {CATEGORIES.map((cat) => {
               const isSelected = form.category === cat;
               const color = CATEGORY_COLORS[cat];
+              const iconName = CATEGORY_ICONS[cat];
+
               return (
                 <Pressable
                   key={cat}
                   onPress={() => {
                     if (isSubmitting) return;
-                    setForm((f) => ({ ...f, category: cat }));
+                    setForm((f) => ({
+                      ...f,
+                      category: cat,
+                      proofMethod: hasManuallySelectedMethod ? f.proofMethod : getDefaultProofMethod(cat),
+                    }));
                     if (errors.category) setErrors((e) => ({ ...e, category: undefined }));
                   }}
+                  android_ripple={{ color: 'rgba(255, 255, 255, 0.08)', borderless: false }}
                   style={({ pressed }) => [
-                    styles.categoryOption,
+                    styles.categoryCard,
                     isSelected && {
                       borderColor: color,
-                      backgroundColor: color + '18',
+                      backgroundColor: color + '15',
                     },
-                    pressed && { opacity: 0.8 },
+                    pressed && styles.cardPressed,
                   ]}
                   accessibilityRole="radio"
                   accessibilityLabel={`Category ${cat}`}
                   accessibilityState={{ checked: isSelected }}>
-                  <Text style={styles.categoryEmoji}>{CATEGORY_EMOJIS[cat]}</Text>
-                  <Text style={[styles.categoryLabel, isSelected && { color }]}>{cat}</Text>
+                  <View
+                    style={[
+                      styles.categoryIconCircle,
+                      { backgroundColor: isSelected ? color + '25' : DD_COLORS.bgHighlight },
+                    ]}>
+                    <DDIcon
+                      name={iconName}
+                      size={20}
+                      color={isSelected ? color : DD_COLORS.textMuted}
+                      weight={isSelected ? 'fill' : 'bold'}
+                    />
+                  </View>
+                  <DDText
+                    variant="label"
+                    bold
+                    style={[styles.categoryLabel, { color: isSelected ? color : DD_COLORS.textSub }]}>
+                    {cat}
+                  </DDText>
                 </Pressable>
               );
             })}
           </View>
         </FormField>
 
-        {/* Duration / Deadline selector */}
+        {/* F. Proof Method Selector */}
+        <FormField
+          label="How will completion be proven?"
+          error={errors.proofUnit || errors.proofRange}
+          required>
+          <View style={styles.proofMethodList}>
+            {PROOF_METHODS.map((pm) => {
+              const isSelected = form.proofMethod === pm.id;
+              return (
+                <Pressable
+                  key={pm.id}
+                  onPress={() => {
+                    if (isSubmitting) return;
+                    setHasManuallySelectedMethod(true);
+                    setForm((f) => ({ ...f, proofMethod: pm.id }));
+                  }}
+                  android_ripple={{ color: 'rgba(191, 253, 64, 0.08)', borderless: false }}
+                  style={({ pressed }) => [
+                    styles.proofMethodCard,
+                    isSelected && styles.proofMethodCardActive,
+                    pressed && styles.cardPressed,
+                  ]}
+                  accessibilityRole="radio"
+                  accessibilityLabel={pm.title}
+                  accessibilityState={{ checked: isSelected }}>
+                  <View style={styles.proofMethodHeader}>
+                    <View
+                      style={[
+                        styles.proofMethodIconCircle,
+                        isSelected && styles.proofMethodIconCircleActive,
+                      ]}>
+                      <DDIcon
+                        name={pm.icon}
+                        size={18}
+                        color={isSelected ? DD_COLORS.lime : DD_COLORS.textMuted}
+                        weight={isSelected ? 'fill' : 'bold'}
+                      />
+                    </View>
+                    <View style={styles.proofMethodTitleGroup}>
+                      <View style={styles.proofMethodTitleRow}>
+                        <DDText
+                          variant="label"
+                          bold
+                          color={isSelected ? 'lime' : 'primary'}
+                          style={styles.proofMethodTitle}>
+                          {pm.title}
+                        </DDText>
+                        <DDBadge
+                          label={pm.badge}
+                          variant={isSelected ? 'lime' : 'neutral'}
+                          size="sm"
+                        />
+                      </View>
+                      <DDText variant="caption" color="secondary" style={styles.proofMethodDesc}>
+                        {pm.description}
+                      </DDText>
+                    </View>
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          {/* Optional Numeric Configuration */}
+          {form.proofMethod === 'numeric_entry' && (
+            <View style={styles.numericConfigBox}>
+              <DDText variant="caption" color="muted" bold style={styles.numericConfigHeader}>
+                NUMERIC PARAMETERS (OPTIONAL)
+              </DDText>
+              <View style={styles.numericInputsRow}>
+                <View style={styles.numericFieldCol}>
+                  <DDText variant="caption" color="secondary" style={styles.numericFieldLabel}>
+                    Unit (e.g. km, reps)
+                  </DDText>
+                  <TextInput
+                    style={[styles.numericInput, errors.proofUnit && styles.inputErrorBorder]}
+                    placeholder="km"
+                    placeholderTextColor={DD_COLORS.textMuted}
+                    value={form.proofUnit}
+                    onChangeText={(v) => {
+                      setForm((f) => ({ ...f, proofUnit: v.slice(0, 12) }));
+                      if (errors.proofUnit) setErrors((e) => ({ ...e, proofUnit: undefined }));
+                    }}
+                    maxLength={12}
+                    editable={!isSubmitting}
+                  />
+                </View>
+
+                <View style={styles.numericFieldCol}>
+                  <DDText variant="caption" color="secondary" style={styles.numericFieldLabel}>
+                    Min Value
+                  </DDText>
+                  <TextInput
+                    style={[styles.numericInput, errors.proofRange && styles.inputErrorBorder]}
+                    placeholder="1"
+                    placeholderTextColor={DD_COLORS.textMuted}
+                    keyboardType="numeric"
+                    value={form.proofMinValue}
+                    onChangeText={(v) => {
+                      setForm((f) => ({ ...f, proofMinValue: v.replace(/[^0-9.]/g, '') }));
+                      if (errors.proofRange) setErrors((e) => ({ ...e, proofRange: undefined }));
+                    }}
+                    editable={!isSubmitting}
+                  />
+                </View>
+
+                <View style={styles.numericFieldCol}>
+                  <DDText variant="caption" color="secondary" style={styles.numericFieldLabel}>
+                    Max Value
+                  </DDText>
+                  <TextInput
+                    style={[styles.numericInput, errors.proofRange && styles.inputErrorBorder]}
+                    placeholder="42"
+                    placeholderTextColor={DD_COLORS.textMuted}
+                    keyboardType="numeric"
+                    value={form.proofMaxValue}
+                    onChangeText={(v) => {
+                      setForm((f) => ({ ...f, proofMaxValue: v.replace(/[^0-9.]/g, '') }));
+                      if (errors.proofRange) setErrors((e) => ({ ...e, proofRange: undefined }));
+                    }}
+                    editable={!isSubmitting}
+                  />
+                </View>
+              </View>
+
+              {errors.proofUnit ? (
+                <DDText variant="caption" color="danger" style={styles.fieldErrorText}>
+                  {errors.proofUnit}
+                </DDText>
+              ) : null}
+              {errors.proofRange ? (
+                <DDText variant="caption" color="danger" style={styles.fieldErrorText}>
+                  {errors.proofRange}
+                </DDText>
+              ) : null}
+            </View>
+          )}
+        </FormField>
+
+        {/* G. Duration and Deadline */}
         <FormField label="Duration & Deadline">
           <View style={styles.deadlineToggleRow}>
             <Pressable
@@ -355,27 +730,26 @@ export default function CreateScreen() {
                 styles.deadlineTab,
                 !form.useCustomDeadline && styles.deadlineTabActive,
               ]}>
-              <Text
-                style={[
-                  styles.deadlineTabText,
-                  !form.useCustomDeadline && styles.deadlineTabTextActive,
-                ]}>
+              <DDText
+                variant="caption"
+                bold
+                color={!form.useCustomDeadline ? 'lime' : 'secondary'}>
                 Preset Durations
-              </Text>
+              </DDText>
             </Pressable>
+
             <Pressable
               onPress={() => setForm((f) => ({ ...f, useCustomDeadline: true }))}
               style={[
                 styles.deadlineTab,
                 form.useCustomDeadline && styles.deadlineTabActive,
               ]}>
-              <Text
-                style={[
-                  styles.deadlineTabText,
-                  form.useCustomDeadline && styles.deadlineTabTextActive,
-                ]}>
+              <DDText
+                variant="caption"
+                bold
+                color={form.useCustomDeadline ? 'lime' : 'secondary'}>
                 Custom Days
-              </Text>
+              </DDText>
             </Pressable>
           </View>
 
@@ -390,28 +764,34 @@ export default function CreateScreen() {
                       if (isSubmitting) return;
                       setForm((f) => ({ ...f, durationDays: d }));
                     }}
+                    android_ripple={{ color: 'rgba(191, 253, 64, 0.1)', borderless: false }}
                     style={({ pressed }) => [
                       styles.durationChip,
                       isSelected && styles.durationChipActive,
-                      pressed && { opacity: 0.8 },
+                      pressed && styles.cardPressed,
                     ]}
                     accessibilityRole="radio"
                     accessibilityLabel={`${d} days`}
                     accessibilityState={{ checked: isSelected }}>
-                    <Text style={[styles.durationNumber, isSelected && styles.durationNumberActive]}>
+                    <DDText
+                      variant="h2"
+                      color={isSelected ? 'lime' : 'primary'}
+                      style={styles.durationNumber}>
                       {d}
-                    </Text>
-                    <Text style={[styles.durationUnit, isSelected && { color: DD.lime }]}>days</Text>
+                    </DDText>
+                    <DDText variant="caption" color={isSelected ? 'lime' : 'muted'}>
+                      days
+                    </DDText>
                   </Pressable>
                 );
               })}
             </View>
           ) : (
-            <View style={styles.customDurationContainer}>
+            <View style={styles.customDurationCard}>
               <TextInput
-                style={[styles.input, styles.customInput, errors.customDays && styles.inputError]}
-                placeholder="e.g. 45"
-                placeholderTextColor={DD.textMuted}
+                style={[styles.customInput, errors.customDays && styles.inputErrorBorder]}
+                placeholder="45"
+                placeholderTextColor={DD_COLORS.textMuted}
                 keyboardType="number-pad"
                 value={form.customDays}
                 onChangeText={(v) => {
@@ -422,39 +802,103 @@ export default function CreateScreen() {
                 accessibilityLabel="Custom challenge days"
                 editable={!isSubmitting}
               />
-              <Text style={styles.customDaysLabel}>Days total</Text>
+              <DDText variant="body" color="secondary" style={styles.customDaysUnit}>
+                days total
+              </DDText>
             </View>
           )}
 
-          {errors.customDays ? <Text style={fieldStyles.error}>{errors.customDays}</Text> : null}
+          {errors.customDays ? (
+            <DDText variant="caption" color="danger" style={styles.fieldErrorText}>
+              {errors.customDays}
+            </DDText>
+          ) : null}
 
-          {/* Computed deadline display */}
-          <View style={styles.deadlinePreviewBox}>
-            <Text style={styles.deadlinePreviewLabel}>Target End Date:</Text>
-            <Text style={styles.deadlinePreviewValue}>{previewDeadlineText}</Text>
+          {/* Computed Target End Date Preview */}
+          <View style={styles.deadlinePreviewCard}>
+            <DDIcon name="calendar" size={16} color={DD_COLORS.lime} weight="bold" />
+            <View style={styles.deadlinePreviewMeta}>
+              <DDText variant="caption" color="muted">
+                Calculated Target Deadline
+              </DDText>
+              <DDText variant="label" color="primary" bold>
+                {previewDeadlineText}
+              </DDText>
+            </View>
           </View>
         </FormField>
 
-        {/* Submit button */}
-        <Pressable
-          onPress={handleSubmit}
+        {/* G. Compact Live Preview Card */}
+        {form.title.trim().length > 0 && (
+          <View style={styles.previewSection}>
+            <DDText variant="caption" color="muted" bold style={styles.previewSectionTitle}>
+              CHALLENGE PREVIEW
+            </DDText>
+            <DDCard variant="card" padding="md" style={styles.livePreviewCard}>
+              <View style={styles.previewBadgeRow}>
+                {form.category ? (
+                  <DDBadge
+                    label={form.category}
+                    variant={form.category}
+                    size="sm"
+                    icon={CATEGORY_ICONS[form.category]}
+                  />
+                ) : (
+                  <DDBadge label="No Category" variant="neutral" size="sm" />
+                )}
+
+                <DDBadge
+                  label={form.challengeType === 'daily' ? 'Daily Dare' : 'One-Time'}
+                  variant={form.challengeType === 'daily' ? 'lime' : 'purple'}
+                  size="sm"
+                  icon={form.challengeType === 'daily' ? 'flame' : 'target'}
+                />
+
+                <DDBadge
+                  label={PROOF_METHODS.find((p) => p.id === form.proofMethod)?.title || 'Gesture'}
+                  variant="neutral"
+                  size="sm"
+                  icon={PROOF_METHODS.find((p) => p.id === form.proofMethod)?.icon}
+                />
+              </View>
+
+              <DDText variant="h3" color="primary" numberOfLines={2} style={styles.previewTitle}>
+                {form.title}
+              </DDText>
+
+              <DDText variant="bodySm" color="secondary" numberOfLines={2}>
+                {form.description || 'Description will appear here…'}
+              </DDText>
+
+              <View style={styles.previewFooter}>
+                <View style={styles.previewMetric}>
+                  <DDIcon name="users" size={13} color={DD_COLORS.textMuted} weight="bold" />
+                  <DDText variant="caption" color="muted">
+                    1 Challenger (You)
+                  </DDText>
+                </View>
+                <View style={styles.previewMetric}>
+                  <DDIcon name="calendar" size={13} color={DD_COLORS.textMuted} weight="bold" />
+                  <DDText variant="caption" color="muted">
+                    {effectiveDurationDays} days duration
+                  </DDText>
+                </View>
+              </View>
+            </DDCard>
+          </View>
+        )}
+
+        {/* H. Launch Publish Action Button */}
+        <DDButton
+          title={isSubmitting ? 'Creating Challenge…' : 'Launch Challenge'}
+          variant="primary"
+          iconLeft={isSubmitting ? undefined : 'plus'}
+          loading={isSubmitting}
           disabled={isSubmitting}
-          style={({ pressed }) => [
-            styles.submitButton,
-            isSubmitting && styles.submitButtonDisabled,
-            pressed && !isSubmitting && styles.submitButtonPressed,
-          ]}
-          accessibilityRole="button"
-          accessibilityLabel="Create challenge">
-          {isSubmitting ? (
-            <View style={styles.submittingContent}>
-              <ActivityIndicator color={DD.bg} size="small" />
-              <Text style={styles.submitButtonText}>Creating Challenge…</Text>
-            </View>
-          ) : (
-            <Text style={styles.submitButtonText}>🚀 Launch Challenge</Text>
-          )}
-        </Pressable>
+          onPress={handleSubmit}
+          fullWidth
+          style={styles.launchButton}
+        />
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -472,19 +916,28 @@ function FormField({
   children: React.ReactNode;
 }) {
   return (
-    <View style={fieldStyles.container}>
-      <View style={fieldStyles.labelRow}>
-        <Text style={fieldStyles.label}>{label}</Text>
-        {required && <Text style={fieldStyles.required}>*</Text>}
+    <View style={styles.formFieldContainer}>
+      <View style={styles.formFieldLabelRow}>
+        <DDText variant="label" color="primary" bold>
+          {label}
+        </DDText>
+        {required && (
+          <DDText variant="caption" color="lime" bold>
+            *
+          </DDText>
+        )}
       </View>
       {children}
-      {error ? <Text style={fieldStyles.error}>{error}</Text> : null}
+      {error ? (
+        <DDText variant="caption" color="danger" style={styles.fieldErrorText}>
+          {error}
+        </DDText>
+      ) : null}
     </View>
   );
 }
 
 function SuccessState({
-  challengeId,
   onView,
   onNew,
 }: {
@@ -494,42 +947,50 @@ function SuccessState({
 }) {
   const insets = useSafeAreaInsets();
   return (
-    <View style={[successStyles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
-      <View style={successStyles.content}>
-        <Text style={successStyles.icon}>🎉</Text>
-        <Text style={successStyles.title}>Challenge Created!</Text>
-        <Text style={successStyles.subtitle}>
-          Your challenge is live and ready for challengers to join.
-        </Text>
+    <View style={[styles.successRoot, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
+      <View style={styles.successContent}>
+        <View style={styles.successIconCircle}>
+          <DDIcon name="trophy" size={48} color={DD_COLORS.lime} weight="fill" />
+        </View>
+        <DDText variant="display" color="primary" align="center" style={styles.successTitle}>
+          Challenge Created!
+        </DDText>
+        <DDText variant="body" color="secondary" align="center" style={styles.successSubtitle}>
+          Your dare is live and ready for challengers to join.
+        </DDText>
 
-        <View style={successStyles.checkList}>
+        <DDCard variant="card" padding="md" style={styles.successCheckCard}>
           {[
             'Challenge published to DareDrop',
             'You are registered as Challenger #1',
-            'Shareable invite link generated',
-          ].map((item) => (
-            <View key={item} style={successStyles.checkItem}>
-              <Text style={successStyles.checkMark}>✓</Text>
-              <Text style={successStyles.checkText}>{item}</Text>
+            'Shareable invite deep link generated',
+          ].map((item, idx) => (
+            <View key={idx} style={styles.checkItem}>
+              <View style={styles.checkCircle}>
+                <DDIcon name="check" size={12} color={DD_COLORS.lime} weight="bold" />
+              </View>
+              <DDText variant="bodySm" color="primary" style={styles.checkText}>
+                {item}
+              </DDText>
             </View>
           ))}
-        </View>
+        </DDCard>
 
-        <Pressable
+        <DDButton
+          title="View Challenge & Invite →"
+          variant="primary"
+          iconRight="arrow-right"
           onPress={onView}
-          style={({ pressed }) => [successStyles.primaryBtn, pressed && { opacity: 0.85 }]}
-          accessibilityRole="button"
-          accessibilityLabel="View challenge and invite friends">
-          <Text style={successStyles.primaryBtnText}>View Challenge & Invite →</Text>
-        </Pressable>
+          fullWidth
+          style={styles.successPrimaryBtn}
+        />
 
-        <Pressable
+        <DDButton
+          title="Create Another Challenge"
+          variant="secondary"
           onPress={onNew}
-          style={({ pressed }) => [successStyles.secondaryBtn, pressed && { opacity: 0.75 }]}
-          accessibilityRole="button"
-          accessibilityLabel="Create another challenge">
-          <Text style={successStyles.secondaryBtnText}>Create Another</Text>
-        </Pressable>
+          fullWidth
+        />
       </View>
     </View>
   );
@@ -538,397 +999,471 @@ function SuccessState({
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: DD.bg,
+    backgroundColor: DD_COLORS.bg,
   },
   scroll: {
     flex: 1,
   },
   content: {
-    paddingHorizontal: DD.s5,
+    paddingHorizontal: DD_SPACING.lg,
   },
+
+  /* Header */
   headerRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    marginBottom: DD.s5,
+    marginBottom: DD_SPACING.xl,
+  },
+  headerTexts: {
+    flex: 1,
+    paddingRight: DD_SPACING.sm,
+  },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: DD_SPACING.xs,
+  },
+  flameIconWrapper: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(191, 253, 64, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tagline: {
+    fontSize: 11,
+    letterSpacing: 2,
   },
   headline: {
-    fontSize: 32,
-    fontWeight: '900',
-    color: DD.text,
     letterSpacing: -1,
     lineHeight: 38,
   },
   subline: {
-    fontSize: 14,
-    color: DD.textSub,
-    marginTop: DD.s1,
+    marginTop: 2,
   },
   backendBadge: {
-    paddingVertical: DD.s1,
-    paddingHorizontal: DD.s2,
-    borderRadius: DD.radiusPill,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: 4,
+    borderRadius: DD_RADII.pill,
     borderWidth: 1,
+    marginTop: 4,
   },
   backendBadgeOnline: {
-    backgroundColor: DD.lime + '18',
-    borderColor: DD.lime + '44',
+    backgroundColor: 'rgba(0, 230, 118, 0.1)',
+    borderColor: 'rgba(0, 230, 118, 0.3)',
   },
   backendBadgeLocal: {
-    backgroundColor: DD.bgElement,
-    borderColor: DD.border,
+    backgroundColor: 'rgba(255, 184, 0, 0.1)',
+    borderColor: 'rgba(255, 184, 0, 0.3)',
   },
-  backendBadgeText: {
-    fontSize: 11,
-    fontWeight: '700',
+  backendDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
-  backendBadgeTextOnline: {
-    color: DD.lime,
-  },
-  backendBadgeTextLocal: {
-    color: DD.textMuted,
-  },
+
+  /* Error Banner */
   errorBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: DD.catFun + '22',
+    gap: DD_SPACING.sm,
+    backgroundColor: 'rgba(255, 59, 86, 0.1)',
+    borderRadius: DD_RADII.md,
     borderWidth: 1,
-    borderColor: DD.catFun,
-    padding: DD.s3,
-    borderRadius: DD.radiusMd,
-    marginBottom: DD.s4,
-    gap: DD.s2,
-  },
-  errorBannerIcon: {
-    fontSize: 18,
+    borderColor: 'rgba(255, 59, 86, 0.3)',
+    padding: DD_SPACING.md,
+    marginBottom: DD_SPACING.lg,
   },
   errorBannerText: {
     flex: 1,
-    color: DD.catFun,
-    fontSize: 13,
-    fontWeight: '600',
   },
-  input: {
-    backgroundColor: DD.bgCard,
-    borderWidth: 1.5,
-    borderColor: DD.border,
-    borderRadius: DD.radiusLg,
-    paddingHorizontal: DD.s4,
-    paddingVertical: DD.s3,
+
+  /* Form Field Container */
+  formFieldContainer: {
+    marginBottom: DD_SPACING.xl,
+  },
+  formFieldLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: DD_SPACING.sm,
+  },
+  fieldErrorText: {
+    marginTop: 4,
+  },
+
+  /* Input Cards */
+  inputCard: {
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.card,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    padding: DD_SPACING.md,
+  },
+  inputCardError: {
+    borderColor: DD_COLORS.danger,
+  },
+  textInput: {
+    color: DD_COLORS.text,
     fontSize: 15,
-    color: DD.text,
+    padding: 0,
+    minHeight: 28,
   },
-  inputError: {
-    borderColor: DD.catFun,
-  },
-  textArea: {
-    height: 110,
-    paddingTop: DD.s3,
+  textAreaInput: {
+    minHeight: 84,
   },
   charCount: {
-    fontSize: 11,
-    color: DD.textMuted,
     textAlign: 'right',
-    marginTop: DD.s1,
+    marginTop: DD_SPACING.xs,
   },
-  categoryGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: DD.s2,
-  },
-  categoryOption: {
-    flex: 1,
-    minWidth: '45%',
-    backgroundColor: DD.bgCard,
-    borderWidth: 1.5,
-    borderColor: DD.border,
-    borderRadius: DD.radiusLg,
-    paddingVertical: DD.s3,
-    paddingHorizontal: DD.s3,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: DD.s2,
-  },
-  categoryEmoji: {
-    fontSize: 20,
-  },
-  categoryLabel: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: DD.textSub,
-  },
-  deadlineToggleRow: {
-    flexDirection: 'row',
-    backgroundColor: DD.bgCard,
-    borderRadius: DD.radiusPill,
-    padding: 3,
-    marginBottom: DD.s3,
-    borderWidth: 1,
-    borderColor: DD.border,
-  },
-  deadlineTab: {
-    flex: 1,
-    paddingVertical: DD.s2,
-    alignItems: 'center',
-    borderRadius: DD.radiusPill,
-  },
-  deadlineTabActive: {
-    backgroundColor: DD.bgElement,
-  },
-  deadlineTabText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: DD.textMuted,
-  },
-  deadlineTabTextActive: {
-    color: DD.lime,
-  },
-  durationRow: {
-    flexDirection: 'row',
-    gap: DD.s2,
-  },
-  durationChip: {
-    flex: 1,
-    backgroundColor: DD.bgCard,
-    borderWidth: 1.5,
-    borderColor: DD.border,
-    borderRadius: DD.radiusLg,
-    paddingVertical: DD.s3,
-    alignItems: 'center',
-  },
-  durationChipActive: {
-    borderColor: DD.lime,
-    backgroundColor: DD.lime + '14',
-  },
-  durationNumber: {
-    fontSize: 20,
-    fontWeight: '900',
-    color: DD.textSub,
-  },
-  durationNumberActive: {
-    color: DD.lime,
-  },
-  durationUnit: {
-    fontSize: 11,
-    color: DD.textMuted,
-    fontWeight: '600',
-  },
-  customDurationContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: DD.s3,
-  },
-  customInput: {
-    width: 100,
-    textAlign: 'center',
-    fontSize: 18,
-    fontWeight: '800',
-  },
-  customDaysLabel: {
-    fontSize: 14,
-    color: DD.textSub,
-    fontWeight: '600',
-  },
-  deadlinePreviewBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: DD.bgCard,
-    paddingHorizontal: DD.s3,
-    paddingVertical: DD.s2,
-    borderRadius: DD.radiusMd,
-    marginTop: DD.s2,
-  },
-  deadlinePreviewLabel: {
-    fontSize: 12,
-    color: DD.textMuted,
-    fontWeight: '600',
-  },
-  deadlinePreviewValue: {
-    fontSize: 12,
-    color: DD.lime,
-    fontWeight: '700',
-  },
+
+  /* Type Selector */
   typeSelectorRow: {
-    gap: DD.s2,
+    gap: DD_SPACING.sm,
   },
   typeCard: {
-    backgroundColor: DD.bgCard,
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.card,
     borderWidth: 1.5,
-    borderColor: DD.border,
-    borderRadius: DD.radiusLg,
-    padding: DD.s3,
+    borderColor: DD_COLORS.borderSubtle,
+    padding: DD_SPACING.lg,
+    gap: DD_SPACING.sm,
   },
   typeCardActive: {
-    borderColor: DD.lime,
-    backgroundColor: DD.lime + '14',
+    borderColor: DD_COLORS.lime,
+    backgroundColor: 'rgba(191, 253, 64, 0.05)',
+  },
+  typeCardActiveViolet: {
+    borderColor: DD_COLORS.purple,
+    backgroundColor: 'rgba(155, 89, 255, 0.05)',
+  },
+  cardPressed: {
+    opacity: 0.88,
+    transform: [{ scale: 0.99 }],
   },
   typeHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s2,
-    marginBottom: 4,
+    gap: DD_SPACING.sm,
   },
-  typeEmoji: {
-    fontSize: 18,
-  },
-  typeTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: DD.textSub,
-  },
-  typeTitleActive: {
-    color: DD.lime,
-  },
-  typeDescription: {
-    fontSize: 12,
-    color: DD.textMuted,
-    lineHeight: 16,
-  },
-  submitButton: {
-    backgroundColor: DD.lime,
-    borderRadius: DD.radiusPill,
-    paddingVertical: DD.s4,
+  typeIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: DD_COLORS.bgElement,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: DD.s4,
-    shadowColor: DD.lime,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 6,
   },
-  submitButtonDisabled: {
-    opacity: 0.65,
+  typeIconCircleActive: {
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
   },
-  submitButtonPressed: {
-    opacity: 0.9,
-    transform: [{ scale: 0.98 }],
+  typeIconCircleActiveViolet: {
+    backgroundColor: 'rgba(155, 89, 255, 0.15)',
   },
-  submittingContent: {
+  typeTitleCol: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s2,
+    justifyContent: 'space-between',
   },
-  submitButtonText: {
+  typeTitle: {
     fontSize: 16,
-    fontWeight: '900',
-    color: DD.bg,
-    letterSpacing: 0.3,
   },
-});
+  typeDescription: {
+    lineHeight: 18,
+  },
 
-const fieldStyles = StyleSheet.create({
-  container: {
-    marginBottom: DD.s5,
+  /* Category Grid */
+  categoryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: DD_SPACING.sm,
   },
-  labelRow: {
+  categoryCard: {
+    width: '48%',
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.card,
+    borderWidth: 1.5,
+    borderColor: DD_COLORS.borderSubtle,
+    padding: DD_SPACING.md,
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    minHeight: 90,
+    justifyContent: 'center',
+  },
+  categoryIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  categoryLabel: {
+    fontSize: 13,
+  },
+
+  /* Proof Method Selector */
+  proofMethodList: {
+    gap: DD_SPACING.sm,
+  },
+  proofMethodCard: {
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.card,
+    borderWidth: 1.5,
+    borderColor: DD_COLORS.borderSubtle,
+    padding: DD_SPACING.md,
+  },
+  proofMethodCardActive: {
+    borderColor: DD_COLORS.lime,
+    backgroundColor: 'rgba(191, 253, 64, 0.05)',
+  },
+  proofMethodHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: DD_SPACING.sm,
+  },
+  proofMethodIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: DD_COLORS.bgElement,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  proofMethodIconCircleActive: {
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
+  },
+  proofMethodTitleGroup: {
+    flex: 1,
+    gap: 3,
+  },
+  proofMethodTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  proofMethodTitle: {
+    fontSize: 15,
+  },
+  proofMethodDesc: {
+    lineHeight: 16,
+  },
+  numericConfigBox: {
+    marginTop: DD_SPACING.sm,
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.card,
+    borderWidth: 1,
+    borderColor: 'rgba(191, 253, 64, 0.2)',
+    padding: DD_SPACING.md,
+    gap: DD_SPACING.sm,
+  },
+  numericConfigHeader: {
+    letterSpacing: 1,
+  },
+  numericInputsRow: {
+    flexDirection: 'row',
+    gap: DD_SPACING.sm,
+  },
+  numericFieldCol: {
+    flex: 1,
+    gap: 4,
+  },
+  numericFieldLabel: {
+    fontSize: 11,
+  },
+  numericInput: {
+    backgroundColor: DD_COLORS.bgElement,
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: DD_COLORS.borderSubtle,
+    paddingHorizontal: DD_SPACING.sm,
+    paddingVertical: DD_SPACING.xs,
+    color: DD_COLORS.text,
+    fontSize: 14,
+    minHeight: 38,
+  },
+
+  /* Duration / Deadline */
+  deadlineToggleRow: {
+    flexDirection: 'row',
+    backgroundColor: DD_COLORS.bgElement,
+    borderRadius: DD_RADII.pill,
+    padding: 3,
+    marginBottom: DD_SPACING.md,
+  },
+  deadlineTab: {
+    flex: 1,
+    paddingVertical: DD_SPACING.sm,
+    alignItems: 'center',
+    borderRadius: DD_RADII.pill,
+  },
+  deadlineTabActive: {
+    backgroundColor: DD_COLORS.bgCard,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  durationRow: {
+    flexDirection: 'row',
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.md,
+  },
+  durationChip: {
+    flex: 1,
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.lg,
+    borderWidth: 1.5,
+    borderColor: DD_COLORS.borderSubtle,
+    paddingVertical: DD_SPACING.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 64,
+  },
+  durationChipActive: {
+    borderColor: DD_COLORS.lime,
+    backgroundColor: 'rgba(191, 253, 64, 0.06)',
+  },
+  durationNumber: {
+    lineHeight: 28,
+  },
+  customDurationCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: DD_COLORS.bgCard,
+    borderRadius: DD_RADII.card,
+    borderWidth: 1.5,
+    borderColor: DD_COLORS.borderSubtle,
+    paddingHorizontal: DD_SPACING.lg,
+    paddingVertical: DD_SPACING.md,
+    marginBottom: DD_SPACING.md,
+    gap: DD_SPACING.sm,
+  },
+  customInput: {
+    color: DD_COLORS.text,
+    fontSize: 22,
+    fontWeight: '900',
+    minWidth: 60,
+    padding: 0,
+  },
+  inputErrorBorder: {
+    color: DD_COLORS.danger,
+  },
+  customDaysUnit: {
+    fontSize: 15,
+  },
+  deadlinePreviewCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    backgroundColor: 'rgba(191, 253, 64, 0.06)',
+    borderRadius: DD_RADII.md,
+    borderWidth: 1,
+    borderColor: 'rgba(191, 253, 64, 0.2)',
+    padding: DD_SPACING.md,
+  },
+  deadlinePreviewMeta: {
+    flex: 1,
+    gap: 2,
+  },
+
+  /* Live Preview */
+  previewSection: {
+    marginBottom: DD_SPACING.xl,
+  },
+  previewSectionTitle: {
+    letterSpacing: 1.5,
+    marginBottom: DD_SPACING.xs,
+  },
+  livePreviewCard: {
+    gap: DD_SPACING.xs,
+    borderColor: DD_COLORS.borderProminent,
+  },
+  previewBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.sm,
+    marginBottom: DD_SPACING.xs,
+  },
+  previewTitle: {
+    lineHeight: 22,
+  },
+  previewFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: DD_SPACING.lg,
+    marginTop: DD_SPACING.sm,
+    paddingTop: DD_SPACING.xs,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.04)',
+  },
+  previewMetric: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    marginBottom: DD.s2,
   },
-  label: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: DD.textSub,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  required: {
-    color: DD.lime,
-    fontSize: 14,
-    fontWeight: '900',
-  },
-  error: {
-    fontSize: 12,
-    color: DD.catFun,
-    marginTop: DD.s1,
-    fontWeight: '600',
-  },
-});
 
-const successStyles = StyleSheet.create({
-  root: {
+  /* Launch CTA */
+  launchButton: {
+    marginTop: DD_SPACING.sm,
+    marginBottom: DD_SPACING.xl,
+  },
+
+  /* Success Screen */
+  successRoot: {
     flex: 1,
-    backgroundColor: DD.bg,
+    backgroundColor: DD_COLORS.bg,
     justifyContent: 'center',
+    paddingHorizontal: DD_SPACING.xl,
+  },
+  successContent: {
     alignItems: 'center',
-    paddingHorizontal: DD.s5,
+    gap: DD_SPACING.md,
   },
-  content: {
-    width: '100%',
-    maxWidth: 360,
+  successIconCircle: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: 'rgba(191, 253, 64, 0.12)',
     alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: DD_SPACING.xs,
   },
-  icon: {
-    fontSize: 64,
-    marginBottom: DD.s4,
+  successTitle: {
+    lineHeight: 38,
   },
-  title: {
-    fontSize: 28,
-    fontWeight: '900',
-    color: DD.text,
-    letterSpacing: -0.5,
-    textAlign: 'center',
-    marginBottom: DD.s2,
+  successSubtitle: {
+    maxWidth: 280,
+    lineHeight: 20,
+    marginBottom: DD_SPACING.sm,
   },
-  subtitle: {
-    fontSize: 15,
-    color: DD.textSub,
-    textAlign: 'center',
-    lineHeight: 22,
-    marginBottom: DD.s6,
-  },
-  checkList: {
+  successCheckCard: {
     width: '100%',
-    backgroundColor: DD.bgCard,
-    borderWidth: 1,
-    borderColor: DD.border,
-    borderRadius: DD.radiusLg,
-    padding: DD.s4,
-    gap: DD.s3,
-    marginBottom: DD.s6,
+    gap: DD_SPACING.md,
+    marginBottom: DD_SPACING.md,
   },
   checkItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: DD.s3,
+    gap: DD_SPACING.sm,
   },
-  checkMark: {
-    color: DD.lime,
-    fontSize: 16,
-    fontWeight: '900',
+  checkCircle: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(191, 253, 64, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   checkText: {
-    fontSize: 14,
-    color: DD.text,
-    fontWeight: '600',
+    flex: 1,
   },
-  primaryBtn: {
-    width: '100%',
-    backgroundColor: DD.lime,
-    borderRadius: DD.radiusPill,
-    paddingVertical: DD.s4,
-    alignItems: 'center',
-    marginBottom: DD.s3,
-  },
-  primaryBtnText: {
-    fontSize: 16,
-    fontWeight: '900',
-    color: DD.bg,
-  },
-  secondaryBtn: {
-    width: '100%',
-    borderWidth: 1.5,
-    borderColor: DD.border,
-    borderRadius: DD.radiusPill,
-    paddingVertical: DD.s3,
-    alignItems: 'center',
-  },
-  secondaryBtnText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: DD.textSub,
+  successPrimaryBtn: {
+    marginBottom: DD_SPACING.xs,
   },
 });

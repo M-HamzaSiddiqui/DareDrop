@@ -41,6 +41,24 @@ This command will move the starter code to the **example** directory and create 
 - If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
 - Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
 
+## Testing
+
+### Unit and static tests
+Run the offline automated test suite:
+
+```bash
+node ./scripts/test-friends.js
+```
+
+### Friends database integration tests
+To run the live concurrency and locking integration test against an isolated, disposable PostgreSQL test database:
+
+```bash
+DATABASE_URL="postgresql://USER:PASSWORD@HOST:PORT/DATABASE" node ./scripts/test-friends-db.js
+```
+
+> **Warning:** The integration test executes `TRUNCATE TABLE` on application tables. Never run this test against a production database.
+
 ## Learn more
 
 To learn more about developing your project with Expo, look at the following resources:
