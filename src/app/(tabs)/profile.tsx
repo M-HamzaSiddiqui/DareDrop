@@ -863,13 +863,13 @@ export default function ProfileScreen() {
                 No joined dares
               </DDText>
               <DDText variant="bodySm" color="secondary" style={styles.emptyDescription}>
-                You have not joined any challenges yet. Browse Discover to take on your first dare!
+                You have not joined any challenges yet. Create your own dare or accept a friend&apos;s invite to get started!
               </DDText>
               <DDButton
                 variant="primary"
-                title="Discover Challenges"
-                iconRight="arrow-right"
-                onPress={() => router.push('/(tabs)/discover')}
+                title="Create a Dare"
+                iconLeft="plus"
+                onPress={() => router.push('/create')}
                 style={styles.emptyButton}
               />
             </DDCard>

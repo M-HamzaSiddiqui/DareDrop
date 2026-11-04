@@ -40,6 +40,14 @@ export interface DbChallenge {
   proof_config?: ProofConfig;
 }
 
+export interface DbChallengeInvitePreview {
+  id: string;
+  title: string;
+  creator_name: string;
+  challenge_type: 'daily' | 'one_time';
+  proof_method: ProofMethod;
+}
+
 export interface DbParticipant {
   id: string;
   challenge_id: string;
@@ -319,6 +327,18 @@ export interface Database {
           p_rejection_reason?: string | null;
         };
         Returns: DbCompletion;
+      };
+      get_challenge_invite_preview: {
+        Args: {
+          p_challenge_id: string;
+        };
+        Returns: DbChallengeInvitePreview[];
+      };
+      join_challenge: {
+        Args: {
+          p_challenge_id: string;
+        };
+        Returns: DbParticipant;
       };
       get_user_notifications: {
         Args: {

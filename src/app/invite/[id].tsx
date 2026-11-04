@@ -24,6 +24,11 @@ import {
   timeRemaining,
 } from '@/data/challenges';
 import { copyInviteLink, shareChallenge } from '@/lib/sharing';
+import {
+  DbChallengeInvitePreview,
+  isSupabaseConfigured,
+  supabase,
+} from '@/lib/supabase';
 import { useAuth } from '@/lib/auth-context';
 import { useChallenges } from '@/store/challenges-store';
 import { DDAvatar } from '@/components/ui/dd-avatar';
@@ -40,6 +45,20 @@ const CATEGORY_ICONS: Record<CategoryKey, DDIconName> = {
   Fun: 'sparkle',
   Learning: 'compass',
 };
+
+function getProofMethodLabel(method?: string): string {
+  switch (method) {
+    case 'photo_code':
+      return 'Photo + Code';
+    case 'text_log':
+      return 'Written Log';
+    case 'numeric_entry':
+      return 'Numeric Entry';
+    case 'physical_action':
+    default:
+      return 'Action + Code';
+  }
+}
 
 /**
  * DareDrop Redesigned Invitation Screen.
@@ -58,13 +77,14 @@ const CATEGORY_ICONS: Record<CategoryKey, DDIconName> = {
  */
 export default function InviteScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { challenges, fetchChallengeById, joinChallenge, isUserJoined } = useChallenges();
+  const { fetchChallengeById, joinChallenge, isUserJoined } = useChallenges();
   const { isGuest, showAuthModal } = useAuth();
   const toast = useToast();
   const insets = useSafeAreaInsets();
 
   const [loading, setLoading] = useState(true);
   const [challenge, setChallenge] = useState<Challenge | null>(null);
+  const [preview, setPreview] = useState<DbChallengeInvitePreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isJoining, setIsJoining] = useState(false);
   const [justJoined, setJustJoined] = useState(false);
@@ -79,17 +99,67 @@ export default function InviteScreen() {
         return;
       }
 
+      // If already joined, immediately open the challenge
+      if (isUserJoined(id)) {
+        router.replace(`/challenge/${id}`);
+        return;
+      }
+
       setLoading(true);
       setError(null);
 
       try {
-        const found = await fetchChallengeById(id);
-        if (!isMounted) return;
+        if (isSupabaseConfigured && supabase) {
+          // 1. Fetch public invite preview (accessible to anon and authenticated)
+          const { data, error: rpcErr } = await supabase.rpc('get_challenge_invite_preview', {
+            p_challenge_id: id,
+          });
 
-        if (found) {
-          setChallenge(found);
+          if (!isMounted) return;
+
+          if (rpcErr || !data || data.length === 0) {
+            setError('This invite is not available or has already ended.');
+            setLoading(false);
+            return;
+          }
+
+          const previewData = data[0] as DbChallengeInvitePreview;
+          setPreview(previewData);
+
+          // 2. Check if current session already has full member/creator access
+          try {
+            const found = await fetchChallengeById(id);
+            if (found && isMounted) {
+              if (found.joined) {
+                router.replace(`/challenge/${id}`);
+                return;
+              }
+              setChallenge(found);
+            }
+          } catch {
+            // Expected for non-members
+          }
         } else {
-          setError('Challenge not found. This dare may have ended or the invite link is invalid.');
+          // Offline / Local fallback mode
+          const found = await fetchChallengeById(id);
+          if (!isMounted) return;
+
+          if (found) {
+            if (found.joined) {
+              router.replace(`/challenge/${id}`);
+              return;
+            }
+            setChallenge(found);
+            setPreview({
+              id: found.id,
+              title: found.title,
+              creator_name: found.creator,
+              challenge_type: found.challengeType,
+              proof_method: found.proofMethod,
+            });
+          } else {
+            setError('This invite is not available or has already ended.');
+          }
         }
       } catch (err: any) {
         if (!isMounted) return;
@@ -103,10 +173,10 @@ export default function InviteScreen() {
     return () => {
       isMounted = false;
     };
-  }, [id, fetchChallengeById]);
+  }, [id, fetchChallengeById, isUserJoined]);
 
   async function handleAccept() {
-    if (!challenge || isJoining) return;
+    if (!id || isJoining) return;
     if (isGuest) {
       showAuthModal({
         title: 'Sign In to Accept Dare',
@@ -120,20 +190,12 @@ export default function InviteScreen() {
 
     setIsJoining(true);
     try {
-      const res = await joinChallenge(challenge.id);
-      if (res.success) {
+      const res = await joinChallenge(id);
+      if (res.success && res.joined) {
         setJustJoined(true);
-        toast.success(`You joined "${challenge.title}"!`);
-        const inStore = challenges.find((c) => c.id === challenge.id);
-        setChallenge((prev) =>
-          prev
-            ? {
-                ...prev,
-                joined: true,
-                participants: inStore ? inStore.participants : prev.participants + 1,
-              }
-            : null,
-        );
+        const dareTitle = preview?.title || challenge?.title || 'the dare';
+        toast.success(`You joined "${dareTitle}"!`);
+        router.replace(`/challenge/${id}`);
       } else {
         const msg = sanitizeUserErrorMessage(res.error, 'Failed to join challenge. Please try again.');
         setError(msg);
@@ -149,16 +211,50 @@ export default function InviteScreen() {
   }
 
   async function handleCopy() {
-    if (!challenge) return;
-    const res = await copyInviteLink(challenge);
+    if (!targetId) return;
+    const dummyChallenge: Challenge = challenge || {
+      id: targetId,
+      title: dareTitle,
+      description,
+      category,
+      durationDays: 7,
+      participants: 1,
+      createdAt: new Date(),
+      endsAt: new Date(Date.now() + 7 * 86400000),
+      creator: creatorName,
+      creatorId: null,
+      joined: alreadyJoined,
+      challengeType,
+      timezone: 'UTC',
+      proofMethod,
+      proofConfig: {},
+    };
+    const res = await copyInviteLink(dummyChallenge);
     if (res.success) {
       toast.success('Invite link copied to clipboard!');
     }
   }
 
   async function handleShare() {
-    if (!challenge) return;
-    await shareChallenge(challenge);
+    if (!targetId) return;
+    const dummyChallenge: Challenge = challenge || {
+      id: targetId,
+      title: dareTitle,
+      description,
+      category,
+      durationDays: 7,
+      participants: 1,
+      createdAt: new Date(),
+      endsAt: new Date(Date.now() + 7 * 86400000),
+      creator: creatorName,
+      creatorId: null,
+      joined: alreadyJoined,
+      challengeType,
+      timezone: 'UTC',
+      proofMethod,
+      proofConfig: {},
+    };
+    await shareChallenge(dummyChallenge);
   }
 
   function handleBack() {
@@ -188,7 +284,7 @@ export default function InviteScreen() {
   }
 
   // 2. Error / Invalid ID State
-  if (error || !challenge) {
+  if (error || (!challenge && !preview)) {
     return (
       <View style={[styles.root, styles.centerContainer]}>
         <StatusBar style="light" />
@@ -197,13 +293,13 @@ export default function InviteScreen() {
             <DDIcon name="warning" size={32} color={DD_COLORS.coral} weight="bold" />
           </View>
           <DDText variant="h2" color="primary" align="center" style={styles.errorTitle}>
-            Invite Expired or Invalid
+            Invite Unavailable
           </DDText>
           <DDText variant="body" color="secondary" align="center" style={styles.errorSubtitle}>
-            {error || 'We could not find the challenge linked to this invite URL.'}
+            {error || 'This dare invite is not available or has already ended.'}
           </DDText>
           <DDButton
-            title="Browse Active Dares →"
+            title="Back to Home"
             variant="primary"
             fullWidth
             onPress={() => router.replace('/')}
@@ -214,21 +310,28 @@ export default function InviteScreen() {
     );
   }
 
-  const catColor = CATEGORY_COLORS[challenge.category as CategoryKey] || DD_COLORS.lime;
-  const catIcon = CATEGORY_ICONS[challenge.category as CategoryKey] || 'flame';
-  const timeLeft = timeRemaining(challenge.endsAt);
-  const isDaily = challenge.challengeType === 'daily';
-  const alreadyJoined = isUserJoined(challenge.id) || challenge.joined || justJoined;
+  const targetId = challenge?.id || preview!.id;
+  const dareTitle = challenge?.title || preview!.title;
+  const creatorName = challenge?.creator || preview!.creator_name;
+  const challengeType = challenge?.challengeType || preview!.challenge_type;
+  const proofMethod = challenge?.proofMethod || preview!.proof_method;
+  const isDaily = challengeType === 'daily';
+  const category = challenge?.category || 'Fitness';
+  const description =
+    challenge?.description ||
+    'Private challenge. Accept the invite to unlock full dare details, track your streak, and submit peer-verified proof.';
+  const catColor = CATEGORY_COLORS[category as CategoryKey] || DD_COLORS.lime;
+  const catIcon = CATEGORY_ICONS[category as CategoryKey] || 'flame';
+  const timeLeft = challenge?.endsAt ? timeRemaining(challenge.endsAt) : 'Active';
+  const alreadyJoined = isUserJoined(targetId) || Boolean(challenge?.joined) || justJoined;
 
-  const { daysElapsed, progressPct } = calculateProgress(
-    challenge.createdAt,
-    challenge.durationDays,
-  );
+  const { daysElapsed, progressPct } = challenge
+    ? calculateProgress(challenge.createdAt, challenge.durationDays)
+    : { daysElapsed: 0, progressPct: 0 };
 
   return (
     <View style={styles.root}>
       <StatusBar style="light" />
-
 
       {/* Header bar */}
       <View style={[styles.navBar, { paddingTop: insets.top + DD_SPACING.xs }]}>
@@ -275,10 +378,10 @@ export default function InviteScreen() {
             Ready to accept?
           </DDText>
           <View style={styles.bannerSubtitleRow}>
-            <DDAvatar name={challenge.creator} size="sm" />
+            <DDAvatar name={creatorName} size="sm" />
             <DDText variant="body" color="secondary" style={styles.bannerSubtitleText}>
               <DDText variant="body" color="primary" bold>
-                {challenge.creator}
+                {creatorName}
               </DDText>{' '}
               challenged you to take on this dare.
             </DDText>
@@ -293,7 +396,7 @@ export default function InviteScreen() {
             <View style={[styles.categoryPill, { backgroundColor: catColor + '1E' }]}>
               <DDIcon name={catIcon} size={13} color={catColor} weight="fill" />
               <DDText variant="caption" style={[styles.categoryPillText, { color: catColor }]}>
-                {challenge.category}
+                {challenge ? challenge.category : 'Private Dare'}
               </DDText>
             </View>
 
@@ -311,100 +414,149 @@ export default function InviteScreen() {
                 {isDaily ? 'Daily Dare' : 'One-Time Dare'}
               </DDText>
             </View>
+
+            <View style={[styles.typePill, { backgroundColor: 'rgba(255, 255, 255, 0.06)' }]}>
+              <DDIcon name="verify" size={12} color={DD_COLORS.textMuted} weight="bold" />
+              <DDText variant="caption" color="secondary" style={styles.typePillText}>
+                {getProofMethodLabel(proofMethod)}
+              </DDText>
+            </View>
           </View>
 
           <DDText variant="h1" color="primary" style={styles.challengeTitle}>
-            {challenge.title}
+            {dareTitle}
           </DDText>
 
           <DDText variant="body" color="secondary" style={styles.challengeDesc}>
-            {challenge.description}
+            {description}
           </DDText>
 
           <View style={styles.creatorRow}>
-            <DDAvatar name={challenge.creator} size="sm" />
+            <DDAvatar name={creatorName} size="sm" />
             <View style={styles.creatorMeta}>
               <DDText variant="caption" color="muted">
                 Created by
               </DDText>
               <DDText variant="label" color="primary" bold>
-                {challenge.creator}
+                {creatorName}
               </DDText>
             </View>
           </View>
         </DDCard>
 
         {/* C. Quick Metrics Row */}
-        <View style={styles.statsGrid}>
-          <DDCard variant="card" padding="sm" style={styles.statBox}>
-            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(155, 89, 255, 0.12)' }]}>
-              <DDIcon name="users" size={16} color={DD_COLORS.purple} weight="bold" />
-            </View>
-            <DDText variant="h2" color="primary" style={styles.statValue}>
-              {formatParticipants(challenge.participants)}
-            </DDText>
-            <DDText variant="caption" color="secondary" style={styles.statLabel}>
-              Challengers
-            </DDText>
-          </DDCard>
+        {challenge ? (
+          <View style={styles.statsGrid}>
+            <DDCard variant="card" padding="sm" style={styles.statBox}>
+              <View style={[styles.statIconBadge, { backgroundColor: 'rgba(155, 89, 255, 0.12)' }]}>
+                <DDIcon name="users" size={16} color={DD_COLORS.purple} weight="bold" />
+              </View>
+              <DDText variant="h2" color="primary" style={styles.statValue}>
+                {formatParticipants(challenge.participants)}
+              </DDText>
+              <DDText variant="caption" color="secondary" style={styles.statLabel}>
+                Challengers
+              </DDText>
+            </DDCard>
 
-          <DDCard variant="card" padding="sm" style={styles.statBox}>
-            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(255, 60, 172, 0.12)' }]}>
-              <DDIcon name="clock" size={16} color={DD_COLORS.catFun} weight="bold" />
-            </View>
-            <DDText variant="h2" color="primary" style={styles.statValue}>
-              {timeLeft}
-            </DDText>
-            <DDText variant="caption" color="secondary" style={styles.statLabel}>
-              Remaining
-            </DDText>
-          </DDCard>
+            <DDCard variant="card" padding="sm" style={styles.statBox}>
+              <View style={[styles.statIconBadge, { backgroundColor: 'rgba(255, 60, 172, 0.12)' }]}>
+                <DDIcon name="clock" size={16} color={DD_COLORS.catFun} weight="bold" />
+              </View>
+              <DDText variant="h2" color="primary" style={styles.statValue}>
+                {timeLeft}
+              </DDText>
+              <DDText variant="caption" color="secondary" style={styles.statLabel}>
+                Remaining
+              </DDText>
+            </DDCard>
 
-          <DDCard variant="card" padding="sm" style={styles.statBox}>
-            <View style={[styles.statIconBadge, { backgroundColor: 'rgba(191, 253, 64, 0.12)' }]}>
-              <DDIcon name="calendar" size={16} color={DD_COLORS.lime} weight="bold" />
-            </View>
-            <DDText variant="h2" color="primary" style={styles.statValue}>
-              {challenge.durationDays}d
-            </DDText>
-            <DDText variant="caption" color="secondary" style={styles.statLabel}>
-              Duration
-            </DDText>
-          </DDCard>
-        </View>
+            <DDCard variant="card" padding="sm" style={styles.statBox}>
+              <View style={[styles.statIconBadge, { backgroundColor: 'rgba(191, 253, 64, 0.12)' }]}>
+                <DDIcon name="calendar" size={16} color={DD_COLORS.lime} weight="bold" />
+              </View>
+              <DDText variant="h2" color="primary" style={styles.statValue}>
+                {challenge.durationDays}d
+              </DDText>
+              <DDText variant="caption" color="secondary" style={styles.statLabel}>
+                Duration
+              </DDText>
+            </DDCard>
+          </View>
+        ) : (
+          <View style={styles.statsGrid}>
+            <DDCard variant="card" padding="sm" style={styles.statBox}>
+              <View style={[styles.statIconBadge, { backgroundColor: 'rgba(155, 89, 255, 0.12)' }]}>
+                <DDIcon name="shield-check" size={16} color={DD_COLORS.purple} weight="bold" />
+              </View>
+              <DDText variant="h3" color="primary" style={styles.statValue}>
+                {getProofMethodLabel(proofMethod)}
+              </DDText>
+              <DDText variant="caption" color="secondary" style={styles.statLabel}>
+                Proof Mode
+              </DDText>
+            </DDCard>
 
-        {/* D. Challenge Timeline */}
-        <DDCard variant="card" padding="md" style={styles.sectionCard}>
-          <View style={styles.timelineHeader}>
-            <View style={styles.timelineHeaderLeft}>
-              <DDIcon name="calendar" size={16} color={DD_COLORS.lime} weight="bold" />
-              <DDText variant="h3" color="primary" style={styles.timelineTitle}>
-                Challenge Timeline
+            <DDCard variant="card" padding="sm" style={styles.statBox}>
+              <View style={[styles.statIconBadge, { backgroundColor: 'rgba(191, 253, 64, 0.12)' }]}>
+                <DDIcon name="lock" size={16} color={DD_COLORS.lime} weight="bold" />
+              </View>
+              <DDText variant="h3" color="primary" style={styles.statValue}>
+                Invite Only
+              </DDText>
+              <DDText variant="caption" color="secondary" style={styles.statLabel}>
+                Privacy
+              </DDText>
+            </DDCard>
+
+            <DDCard variant="card" padding="sm" style={styles.statBox}>
+              <View style={[styles.statIconBadge, { backgroundColor: 'rgba(255, 60, 172, 0.12)' }]}>
+                <DDIcon name={isDaily ? 'flame' : 'target'} size={16} color={DD_COLORS.catFun} weight="bold" />
+              </View>
+              <DDText variant="h3" color="primary" style={styles.statValue}>
+                {isDaily ? 'Daily' : 'One-Time'}
+              </DDText>
+              <DDText variant="caption" color="secondary" style={styles.statLabel}>
+                Cadence
+              </DDText>
+            </DDCard>
+          </View>
+        )}
+
+        {/* D. Challenge Timeline (if full challenge loaded) */}
+        {challenge && (
+          <DDCard variant="card" padding="md" style={styles.sectionCard}>
+            <View style={styles.timelineHeader}>
+              <View style={styles.timelineHeaderLeft}>
+                <DDIcon name="calendar" size={16} color={DD_COLORS.lime} weight="bold" />
+                <DDText variant="h3" color="primary" style={styles.timelineTitle}>
+                  Challenge Timeline
+                </DDText>
+              </View>
+              <DDText variant="h3" style={[styles.progressPctText, { color: catColor }]}>
+                {progressPct}%
               </DDText>
             </View>
-            <DDText variant="h3" style={[styles.progressPctText, { color: catColor }]}>
-              {progressPct}%
-            </DDText>
-          </View>
 
-          <View style={styles.progressTrack}>
-            <View
-              style={[
-                styles.progressFill,
-                { width: `${Math.min(100, Math.max(0, progressPct))}%` as any, backgroundColor: catColor },
-              ]}
-            />
-          </View>
+            <View style={styles.progressTrack}>
+              <View
+                style={[
+                  styles.progressFill,
+                  { width: `${Math.min(100, Math.max(0, progressPct))}%` as any, backgroundColor: catColor },
+                ]}
+              />
+            </View>
 
-          <View style={styles.timelineFooter}>
-            <DDText variant="caption" color="muted">
-              Day {daysElapsed + 1} of {challenge.durationDays}
-            </DDText>
-            <DDText variant="caption" color="muted">
-              {timeLeft} left
-            </DDText>
-          </View>
-        </DDCard>
+            <View style={styles.timelineFooter}>
+              <DDText variant="caption" color="muted">
+                Day {daysElapsed + 1} of {challenge.durationDays}
+              </DDText>
+              <DDText variant="caption" color="muted">
+                {timeLeft} left
+              </DDText>
+            </View>
+          </DDCard>
+        )}
 
         {/* E. The DareDrop Pact (Rules) */}
         <DDCard variant="card" padding="md" style={styles.sectionCard}>
@@ -465,7 +617,7 @@ export default function InviteScreen() {
             variant="secondary"
             iconRight="arrow-right"
             fullWidth
-            onPress={() => router.push(`/challenge/${challenge.id}`)}
+            onPress={() => router.replace(`/challenge/${targetId}`)}
           />
         ) : (
           <DDButton

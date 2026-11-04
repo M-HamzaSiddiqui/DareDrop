@@ -409,19 +409,19 @@ export default function ChallengeDetailScreen() {
       <View style={[styles.root, styles.notFound]}>
         <StatusBar style="light" />
         <View style={styles.notFoundIconCircle}>
-          <DDIcon name="search" size={40} color={DD_COLORS.textMuted} weight="bold" />
+          <DDIcon name="lock" size={40} color={DD_COLORS.textMuted} weight="bold" />
         </View>
         <DDText variant="h2" color="primary">
-          Challenge not found
+          Dare Unavailable
         </DDText>
         <DDText variant="bodySm" color="secondary" align="center" style={styles.notFoundSubtext}>
-          This challenge may have been removed or the link is invalid.
+          {"You don't have access to this dare. Ask the creator for an invite link."}
         </DDText>
         <DDButton
-          title="Go Back"
+          title="Back to Home"
           variant="secondary"
           iconLeft="arrow-left"
-          onPress={handleBack}
+          onPress={() => router.replace('/')}
           style={styles.backBtn}
         />
       </View>
